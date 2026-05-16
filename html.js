@@ -768,6 +768,30 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 			continue
 		}
 
+		// Attempt to a bit forgiving on whitespace differences between SSR/live DOM
+		// and target DOM, before using stricter canHydrateNode() check
+		if (
+			liveNode.nodeType === Node.TEXT_NODE &&
+			liveNode.nodeValue?.trim() === '' &&
+			targetNode.nodeType !== Node.TEXT_NODE &&
+			!(parentNode instanceof Element && parentNode.tagName === 'PRE')
+		) {
+			/** @type {ChildNode} */ (liveNode).remove()
+			liveIndex++
+			continue
+		}
+		if (
+			targetNode.nodeType === Node.TEXT_NODE &&
+			targetNode.nodeValue?.trim() === '' &&
+			liveNode.nodeType !== Node.TEXT_NODE &&
+			!(parentNode instanceof Element && parentNode.tagName === 'PRE')
+		) {
+			parentNode.insertBefore(targetNode, liveNode)
+			adoptSubtree(adoptionMap, targetNode)
+			targetIndex++
+			continue
+		}
+
 		if (!canHydrateNode(liveNode, targetNode)) {
 			parentNode.replaceChild(targetNode, liveNode)
 			adoptSubtree(adoptionMap, targetNode)

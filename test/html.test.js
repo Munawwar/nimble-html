@@ -116,6 +116,50 @@ describe('html template function', () => {
 		assertEquals(clicked, 1, 'Repeated hydration should not duplicate event listeners')
 	})
 
+	it('ignores formatting whitespace text nodes when hydrating a live slice', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '\n<div><input value="hello"></div>\n'
+		const liveDiv = /** @type {HTMLDivElement} */ (container.childNodes[1])
+		const liveInput = /** @type {HTMLInputElement} */ (liveDiv.firstChild)
+		liveInput.value = 'hello world'
+		const key = Symbol()
+
+		const [div] = /** @type {[HTMLDivElement]} */ (html`<div><input value=${'hello'}></div>`(key, Array.from(container.childNodes)))
+		const input = /** @type {HTMLInputElement} */ (div.firstChild)
+
+		assertEquals(div, liveDiv, 'Hydration should reuse the existing root element despite surrounding whitespace')
+		assertEquals(input, liveInput, 'Hydration should reuse the existing input node')
+		assertEquals(input.value, 'hello world', 'Hydration should preserve the live input value')
+	})
+
+	it('inserts formatting whitespace text nodes when the target includes them', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '<section><div>one</div><div>two</div></section>'
+		const liveSection = /** @type {HTMLElement} */ (container.firstChild)
+		const liveOne = /** @type {HTMLDivElement} */ (liveSection.childNodes[0])
+		const liveTwo = /** @type {HTMLDivElement} */ (liveSection.childNodes[1])
+		const key = Symbol()
+
+		const [section] = /** @type {[HTMLElement]} */ (
+			html`
+				<section>
+					<div>one</div>
+					<div>two</div>
+				</section>
+			`(key, Array.from(container.childNodes))
+		)
+		const one = /** @type {HTMLDivElement} */ (section.childNodes[1])
+		const two = /** @type {HTMLDivElement} */ (section.childNodes[3])
+
+		assertEquals(section, liveSection, 'Hydration should reuse the section root')
+		assertEquals(one, liveOne, 'Hydration should reuse the first div')
+		assertEquals(two, liveTwo, 'Hydration should reuse the second div')
+		assertEquals(section.childNodes.length, 5, 'Hydration should insert the formatting whitespace text nodes')
+		assertTrue(section.childNodes[0] instanceof Text, 'Inserted leading child should be a text node')
+		assertTrue(section.childNodes[2] instanceof Text, 'Inserted middle child should be a text node')
+		assertTrue(section.childNodes[4] instanceof Text, 'Inserted trailing child should be a text node')
+	})
+
 	it('returns different instances for different keys', () => {
 		const key1 = Symbol()
 		const key2 = Symbol()
