@@ -99,6 +99,23 @@ describe('html template function', () => {
 		assertEquals(div2.textContent, 'second call', 'Content should be updated')
 	})
 
+	it('keeps hydration idempotent when reusing the same key and live nodes', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '<button>save</button>'
+		const liveButton = /** @type {HTMLButtonElement} */ (container.firstChild)
+		const key = Symbol()
+		let clicked = 0
+		const view = html`<button @click=${() => clicked++}>save</button>`
+
+		const [button1] = /** @type {[HTMLButtonElement]} */ (view(key, [liveButton]))
+		const [button2] = /** @type {[HTMLButtonElement]} */ (view(key, [liveButton]))
+
+		assertEquals(button1, liveButton, 'First hydration should reuse the existing button')
+		assertEquals(button2, liveButton, 'Repeated hydration should keep the same live button')
+		liveButton.click()
+		assertEquals(clicked, 1, 'Repeated hydration should not duplicate event listeners')
+	})
+
 	it('returns different instances for different keys', () => {
 		const key1 = Symbol()
 		const key2 = Symbol()

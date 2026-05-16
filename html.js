@@ -3,8 +3,9 @@
  *
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns DOM nodes rendered with the given
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns DOM nodes rendered with the given
  * values.
  */
 export function html(strings, ...values) {
@@ -16,8 +17,9 @@ export function html(strings, ...values) {
  *
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns SVG DOM nodes rendered with the given
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns SVG DOM nodes rendered with the given
  * values.
  */
 export function svg(strings, ...values) {
@@ -29,9 +31,10 @@ export function svg(strings, ...values) {
  *
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns MathML DOM nodes rendered with the given
- * values.
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns MathML DOM nodes rendered with the
+ * given values.
  */
 export function mathml(strings, ...values) {
 	return handleTemplateTag('mathml', strings, ...values)
@@ -101,24 +104,26 @@ function handleForceValue(site, value) {
  * @param {TemplateMode} mode
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns DOM nodes rendered with the given
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns DOM nodes rendered with the given
  * values.
  */
 function handleTemplateTag(mode, strings, ...values) {
 	const template = parseTemplate(strings, mode)
-
-	const useFunctionWrapper = true
-
-	if (useFunctionWrapper)
-		return function (key = Symbol()) {
-			template.values = values
-			return template.updateInstance(key)
-		}
-	else {
+	/** @type {((key?: any, liveNodes?: Node[]) => TemplateNodes) & {template: Template}} */
+	const renderFn = function (key = Symbol(), liveNodes) {
 		template.values = values
-		return template.updateInstance
-	}
+		return liveNodes
+			? template.hydrateInstance(
+					key,
+					/** @type {Element | ShadowRoot | DocumentFragment} */ (liveNodes[0]?.parentNode),
+					liveNodes,
+			  )
+			: template.updateInstance(key)
+	};
+	renderFn.template = template
+	return renderFn
 }
 
 /**
@@ -427,11 +432,37 @@ class Template {
 	 * Update instance with new values. This gets returned by the `html`
 	 * function for users to call with their keys.
 	 *
-	 * @param {TemplateKey=} key
+	 * @param {TemplateKey} key
 	 */
 	updateInstance = (key = Symbol()) => {
 		const templateInstance = this.getInstance(key)
 		templateInstance.applyValues(this.values)
+		return templateInstance.nodes
+	}
+
+	/**
+	 * Hydrate an existing DOM subtree into a template instance, reusing matching
+	 * nodes and replacing mismatches with the template-owned nodes.
+	 *
+	 * @param {TemplateKey} key
+	 * @param {Element | ShadowRoot | DocumentFragment} container
+	 * @param {Node[]} liveNodes
+	 */
+	hydrateInstance = (key, container, liveNodes) => {
+		const templateInstance = this.getInstance(key)
+		templateInstance.applyValues(this.values)
+
+		/** @type {Map<Node, Node>} */
+		const adoptionMap = new Map()
+		reconcileHydrationNodes(
+			container,
+			liveNodes,
+			/** @type {Node[]} */ ([...templateInstance.nodes]),
+			adoptionMap,
+			liveNodes[liveNodes.length - 1]?.nextSibling || null,
+		)
+
+		templateInstance.absorb(adoptionMap)
 		return templateInstance.nodes
 	}
 }
@@ -657,7 +688,112 @@ function insertNodesAndUpdateSite(site, nodes) {
  * @param {InterpolationSite} site
  */
 function clearPreviousNodes(site) {
-	if (site.insertedNodes) for (const node of site.insertedNodes) node.remove()
+	if (site.insertedNodes) for (const node of site.insertedNodes) /** @type {ChildNode} */ (node).remove()
+}
+
+/**
+ * Map a node subtree to itself for nodes that remain template-owned after
+ * hydration fallback replacement.
+ *
+ * @param {Map<Node, Node>} adoptionMap
+ * @param {Node} root
+ */
+function adoptSubtree(adoptionMap, root) {
+	const nodes = [root]
+
+	while (nodes.length) {
+		const node = /** @type {Node} */ (nodes.pop())
+		adoptionMap.set(node, node)
+		for (let child = node.lastChild; child; child = child.previousSibling) nodes.push(child)
+	}
+}
+
+/**
+ * Compare whether a live node can be adopted in place for hydration.
+ *
+ * @param {Node} liveNode
+ * @param {Node} targetNode
+ */
+function canHydrateNode(liveNode, targetNode) {
+	if (liveNode.nodeType !== targetNode.nodeType) return false
+	if (liveNode.nodeType === Node.COMMENT_NODE) return liveNode.nodeValue === targetNode.nodeValue
+	// text and cdata would be patched anyway
+	if (liveNode.nodeType === Node.TEXT_NODE || liveNode.nodeType === Node.CDATA_SECTION_NODE) return true
+	if (liveNode.nodeType !== Node.ELEMENT_NODE) return liveNode.isEqualNode(targetNode)
+
+	// For elements, compare tag name, namespace and attributes
+	const liveElement = /** @type {Element} */ (liveNode)
+	const targetElement = /** @type {Element} */ (targetNode)
+
+	if (
+		liveElement.namespaceURI !== targetElement.namespaceURI
+		|| liveElement.tagName !== targetElement.tagName
+		|| liveElement.attributes.length !== targetElement.attributes.length
+	) return false
+
+	for (const attr of targetElement.attributes)
+		if (liveElement.getAttribute(attr.name) !== attr.value) return false
+
+	return true
+}
+
+/**
+ * Reuse matching live DOM nodes and replace mismatches with template-owned
+ * nodes, walking children in order without keyed diffing.
+ *
+ * @param {Element | ShadowRoot | DocumentFragment | Element} parentNode
+ * @param {Node[]} liveNodes
+ * @param {Node[]} targetNodes
+ * @param {Map<Node, Node>} adoptionMap
+ * @param {Node | null} nextSibling
+ */
+function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap, nextSibling = null) {
+	let liveIndex = 0
+	let targetIndex = 0
+
+	while (liveIndex < liveNodes.length || targetIndex < targetNodes.length) {
+		const liveNode = liveNodes[liveIndex]
+		const targetNode = targetNodes[targetIndex]
+
+		if (!liveNode && targetNode) {
+			parentNode.insertBefore(targetNode, nextSibling)
+			adoptSubtree(adoptionMap, targetNode)
+			targetIndex++
+			continue
+		}
+
+		if (liveNode && !targetNode) {
+			/** @type {ChildNode} */ (liveNode).remove()
+			liveIndex++
+			continue
+		}
+
+		if (!canHydrateNode(liveNode, targetNode)) {
+			parentNode.replaceChild(targetNode, liveNode)
+			adoptSubtree(adoptionMap, targetNode)
+			liveIndex++
+			targetIndex++
+			continue
+		}
+
+		adoptionMap.set(targetNode, liveNode)
+
+		if (liveNode.nodeType === Node.TEXT_NODE || liveNode.nodeType === Node.CDATA_SECTION_NODE) {
+			if (liveNode.nodeValue !== targetNode.nodeValue) liveNode.nodeValue = targetNode.nodeValue
+			} else if (liveNode.nodeType === Node.ELEMENT_NODE) {
+				const liveElement = /** @type {Element} */ (liveNode)
+				reconcileHydrationNodes(
+					liveElement,
+					Array.from(liveElement.childNodes),
+					Array.from(targetNode.childNodes),
+					adoptionMap,
+					null,
+				)
+			}
+
+		liveIndex++
+		targetIndex++
+	}
 }
 
 /**
@@ -674,6 +810,47 @@ class TemplateInstance {
 	constructor(nodes, sites) {
 		this.nodes = nodes
 		this.sites = sites
+	}
+
+	/**
+	 * Absorb live nodes mapped for adoption into this template instance.
+	 *
+	 * @param {Map<Node, Node>} adoptionMap
+	 */
+	absorb(adoptionMap) {
+		this.nodes = /** @type {TemplateNodes} */ (Object.freeze(
+			this.nodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node))
+		))
+		for (const site of this.sites) {
+			const previousNode = site.node
+			const node = /** @type {Element | Text} */ (adoptionMap.get(site.node) || site.node)
+			
+			// If an event site moved to a different adopted node, detach the old wrapper
+			// before we retarget the site bookkeeping.
+			if (site.type === 'event' && site.internalHandler && node !== previousNode)
+				previousNode.removeEventListener(site.attributeName || '', site.internalHandler)
+			
+			site.node = node
+			if (site.insertedNodes)
+				site.insertedNodes = site.insertedNodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node))
+			
+			// attach event listeners and for custom elements initialize props
+			if (site.type === 'event') {
+				if (node !== previousNode) site.internalHandler = undefined
+				else continue
+			} else if (site.type === 'property') {
+				const element = /** @type {Element} */ (site.node)
+				if (element.localName.includes('-')) /** @type {any} */ (element)[site.attributeName || ''] = site.lastValue
+				continue
+			}
+
+			if (site.type === 'event' && site.currentEventListener && !site.internalHandler) {
+				const element = /** @type {Element} */ (site.node)
+				site.internalHandler = /** @type {EventListener} */ (event => site.currentEventListener?.(event))
+				element.addEventListener(site.attributeName || '', site.internalHandler)
+			}
+		}
+		return this
 	}
 
 	/**
@@ -840,7 +1017,6 @@ class TemplateInstance {
 /** @typedef {unknown} InterpolationValue */
 /** @typedef {symbol | object | function} WeakMapKey */
 /** @typedef {WeakMapKey} TemplateKey */
-
 /**
  * Holds information about an interpolation site in the template, f.e. the
  * `${...}` in `<div>${...}</div>` or `<button .onclick=${...}>`.
