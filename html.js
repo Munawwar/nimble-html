@@ -137,6 +137,9 @@ const INTERPOLATION_MARKER = '⧙⧘'
 
 /** RegExp for matching interpolation markers */
 const INTERPOLATION_REGEXP = new RegExp(`${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
+const SPREAD_INTERPOLATION_REGEXP = new RegExp(`^\\.\\.\\.${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
+const SPREAD_PLACEHOLDER_ATTR_PREFIX = `x-${INTERPOLATION_MARKER}spread-`
+const SPREAD_PLACEHOLDER_ATTR_REGEXP = new RegExp(`^${SPREAD_PLACEHOLDER_ATTR_PREFIX}(\\d+)${INTERPOLATION_MARKER}$`)
 
 /** Regex for finding HTML opening/self-closing tags */
 const HTML_TAG_REGEXP = /<[^<>]*?\/?>/g
@@ -245,9 +248,10 @@ class Template {
 		//    case-insensitive, while still preserving the original case for JS
 		//    property names so we can set them correctly on the elements.
 
-		// Scan for HTML tags and process .property attributes within each tag
+		// Scan for HTML tags and process spread/.property attributes within each tag
 		htmlString = htmlString.replace(HTML_TAG_REGEXP, tagMatch => {
-			// Parse the tag content more carefully to avoid matching dots inside quoted attribute values
+			// Parse the tag content more carefully to avoid matching spread/property
+			// syntax inside quoted attribute values.
 			const parts = []
 			let lastIndex = 0
 			let inQuotes = false
@@ -264,6 +268,15 @@ class Template {
 					inQuotes = false
 					quoteChar = ''
 				} else if (!inQuotes && i > 0 && /\s/.test(tagMatch[i - 1])) {
+					const spreadMatch = tagMatch.slice(i).match(SPREAD_INTERPOLATION_REGEXP)
+					if (spreadMatch) {
+						parts.push(tagMatch.slice(lastIndex, i))
+						parts.push(`${SPREAD_PLACEHOLDER_ATTR_PREFIX}${spreadMatch[1]}${INTERPOLATION_MARKER}=""`)
+						lastIndex = i + spreadMatch[0].length
+						i = lastIndex - 1
+						continue
+					}
+
 					// Detect attribute patterns when preceded by whitespace and not in quotes
 					let prefix = null
 
@@ -522,6 +535,17 @@ function findInterpolationSites(fragment, caseMappings) {
 			for (const attr of element.attributes) {
 				const name = attr.name
 				const value = attr.value
+				const spreadMatch = name.match(SPREAD_PLACEHOLDER_ATTR_REGEXP)
+
+				if (spreadMatch) {
+					sites.push({
+						node: element,
+						type: /** @type {'spread'} */ ('spread'),
+						interpolationIndex: parseInt(spreadMatch[1]),
+					})
+					attributesToRemove.push(name)
+					continue
+				}
 
 				// Handle both interpolated and static special attributes, plus regular attributes marked with !
 				if (
@@ -611,6 +635,165 @@ function getStableNestedKey(site, index) {
 	let key = indexKeys[index]
 	if (!key) indexKeys[index] = key = Symbol('nested-template-key' + index)
 	return key
+}
+
+/**
+ * @param {InterpolationSite} site
+ * @param {unknown} spreadValue
+ */
+function prepareSpreadSite(site, spreadValue) {
+	let preparedValue = null
+
+	if (spreadValue != null && spreadValue !== false) {
+		if (typeof spreadValue !== 'object' || Array.isArray(spreadValue) || spreadValue instanceof Node)
+			throw new TypeError('Spread value must be an object, null, or false')
+		preparedValue = {...spreadValue}
+	}
+
+	site.preparedValue = preparedValue
+}
+
+/**
+ * @param {'attribute'|'boolean-attribute'|'property'|'event'} type
+ * @param {string} name
+ */
+function getBindingKey(type, name) {
+	if (type === 'boolean-attribute') return `?${name}`
+	if (type === 'property') return `.${name}`
+	if (type === 'event') return `@${name}`
+	return name
+}
+
+/**
+ * @param {string} eventName
+ * @param {unknown} inputValue
+ */
+function resolveEventListener(eventName, inputValue) {
+	if (typeof inputValue === 'function') return /** @type {EventListener} */ (inputValue)
+	if (typeof inputValue === 'string') return /** @type {EventListener} */ (new Function('event', inputValue))
+	if (inputValue == null || inputValue === '' || inputValue === false) return null
+	throw new TypeError(`Event handler for ${eventName} must be a function or string`)
+}
+
+/**
+ * @param {Element} element
+ * @param {string} eventName
+ * @param {{ internalHandler?: EventListener, currentEventListener?: EventListener }} state
+ * @param {unknown} inputValue
+ */
+function updateEventHandler(element, eventName, state, inputValue) {
+	const eventListener = resolveEventListener(eventName, inputValue)
+
+	if (eventListener) {
+		if (!state.internalHandler) {
+			state.internalHandler = /** @type {EventListener} */ (event => state.currentEventListener?.(event))
+			element.addEventListener(eventName, state.internalHandler)
+		}
+		state.currentEventListener = eventListener
+		return true
+	}
+
+	if (state.internalHandler) {
+		element.removeEventListener(eventName, state.internalHandler)
+		state.internalHandler = undefined
+		state.currentEventListener = undefined
+	}
+
+	return false
+}
+
+/**
+ * @param {InterpolationSite} site
+ * @param {string} name
+ */
+function clearSpreadBinding(site, name) {
+	const element = /** @type {Element} */ (site.node)
+
+	if (name.startsWith('@')) {
+		const eventName = name.slice(1)
+		const spreadEventState = site.spreadHandlers?.get(eventName)
+		if (spreadEventState?.internalHandler) {
+			element.removeEventListener(eventName, spreadEventState.internalHandler)
+			if (site.spreadHandlers) {
+				site.spreadHandlers.delete(eventName)
+				if (!site.spreadHandlers.size) site.spreadHandlers = undefined
+			}
+		}
+	} else if (name.startsWith('.')) {
+		/** @type {any} */ (element)[name.slice(1)] = undefined
+	} else {
+		element.removeAttribute(name.startsWith('?') ? name.slice(1) : name)
+	}
+}
+
+/**
+ * @param {Record<string, unknown> | null | undefined} a
+ * @param {Record<string, unknown> | null | undefined} b
+ */
+function shallowObjectEquals(a, b) {
+	if (a === b) return true
+	if (!a || !b) return !a && !b
+	const keys = Object.keys(a)
+	if (keys.length !== Object.keys(b).length) return false
+	for (const key of keys)
+		if (!(key in b) || a[key] !== b[key]) return false
+	return true
+}
+
+/**
+ * @param {InterpolationSite} site
+ * @param {boolean} [hydrateOnly]
+ * @param {boolean} [forceApply]
+ */
+function applyPreparedSpreadSite(site, hydrateOnly = false, forceApply = false) {
+	const spreadValue = /** @type {Record<string, unknown> | null} */ (site.preparedValue)
+
+	const element = /** @type {Element} */ (site.node)
+	let spreadHandlers = site.spreadHandlers
+
+	site.preparedValue = undefined
+
+	if (!forceApply && !site.skipEqualityCheck && shallowObjectEquals(/** @type {Record<string, unknown> | null} */ (site.lastValue), spreadValue)) return []
+
+	for (const [name, inputValue] of Object.entries(spreadValue || {})) {
+			if (name.startsWith('@')) {
+				const eventName = name.slice(1)
+				const spreadEventState = /** @type {{ internalHandler?: EventListener, currentEventListener?: EventListener }} */ (
+					spreadHandlers?.get(eventName) || {}
+				)
+			if (updateEventHandler(element, eventName, /** @type {any} */ (spreadEventState), inputValue)) {
+				if (!spreadHandlers) site.spreadHandlers = spreadHandlers = new Map()
+				spreadHandlers.set(eventName, spreadEventState)
+			} else if (spreadHandlers?.has(eventName)) {
+				spreadHandlers.delete(eventName)
+				if (!spreadHandlers.size) site.spreadHandlers = spreadHandlers = undefined
+			}
+			continue
+		}
+
+		if (hydrateOnly) {
+			if (name.startsWith('.') && element.localName.includes('-'))
+				/** @type {any} */ (element)[name.slice(1)] = inputValue
+			continue
+		}
+
+		if (name.startsWith('?')) {
+			if (inputValue) element.setAttribute(name.slice(1), '')
+			else element.removeAttribute(name.slice(1))
+		} else if (name.startsWith('.')) {
+			/** @type {any} */ (element)[name.slice(1)] = inputValue
+		} else {
+			if (inputValue instanceof Node || Array.isArray(inputValue) || typeof inputValue === 'function')
+				throw new Error(
+					'Nested templates and DOM elements are not allowed in attributes. Use text content interpolation instead.',
+				)
+			element.setAttribute(name, String(inputValue ?? ''))
+		}
+
+	}
+
+	site.lastValue = spreadValue
+	return spreadValue ? Object.keys(spreadValue) : []
 }
 
 /**
@@ -949,6 +1132,16 @@ class TemplateInstance {
 			if (site.type === 'event') {
 				if (node !== previousNode) site.internalHandler = undefined
 				else continue
+			} else if (site.type === 'spread') {
+				if (node !== previousNode && site.spreadHandlers) {
+					for (const [eventName, spreadEventState] of site.spreadHandlers)
+						if (spreadEventState.internalHandler)
+							previousNode.removeEventListener(eventName, spreadEventState.internalHandler)
+					site.spreadHandlers = undefined
+				}
+				prepareSpreadSite(site, site.lastValue)
+				applyPreparedSpreadSite(site, true, true)
+				continue
 			} else if (site.type === 'property') {
 				const element = /** @type {Element} */ (site.node)
 				if (element.localName.includes('-')) /** @type {any} */ (element)[site.attributeName || ''] = site.lastValue
@@ -970,6 +1163,26 @@ class TemplateInstance {
 	 */
 	applyValues(values) {
 		const sites = this.sites
+		const pendingSpreadKeys = new WeakMap()
+
+		for (const site of sites)
+			if (site.type === 'spread') {
+				prepareSpreadSite(site, handleForceValue(site, values[/** @type {number} */ (site.interpolationIndex)]))
+				const currentSpread = /** @type {Record<string, unknown> | null} */ (site.preparedValue)
+				const previousSpread = /** @type {Record<string, unknown> | null} */ (site.lastValue)
+				if (!previousSpread) continue
+
+				const element = /** @type {Element} */ (site.node)
+				let elementKeys = pendingSpreadKeys.get(element)
+
+				for (const name of Object.keys(previousSpread)) {
+					if (currentSpread && name in currentSpread) continue
+
+					if (!elementKeys) pendingSpreadKeys.set(element, (elementKeys = new Set()))
+					elementKeys.add(name)
+					clearSpreadBinding(site, name)
+				}
+			}
 
 		for (const site of sites) {
 			if (site.type === 'text') {
@@ -978,6 +1191,8 @@ class TemplateInstance {
 				interpolateTextSite(site, value)
 			} else if (site.type === 'attribute') {
 				const element = /** @type {Element} */ (site.node)
+				const pendingKeys = pendingSpreadKeys.get(element)
+				const staleKey = getBindingKey(site.type, site.attributeName || '')
 				const parts = site.parts || []
 
 				// Handle force detection and unwrapping for attribute values
@@ -1000,7 +1215,7 @@ class TemplateInstance {
 						return value
 					})
 
-				if (!site.skipEqualityCheck && arrayEquals(/** @type {unknown[]} */ (site.lastValue), attributeValues)) continue // No change
+				if (!pendingKeys?.has(staleKey) && !site.skipEqualityCheck && arrayEquals(/** @type {unknown[]} */ (site.lastValue), attributeValues)) continue // No change
 
 				// Check if any attribute value would produce DOM nodes - not allowed in attributes
 				if (
@@ -1020,8 +1235,11 @@ class TemplateInstance {
 				const newAttributeValue = joinPartsWithValues(parts, processedValues)
 				element.setAttribute(site.attributeName || '', newAttributeValue)
 				site.lastValue = attributeValues
+				pendingKeys?.delete(staleKey)
 			} else if (site.type === 'boolean-attribute') {
 				const element = /** @type {Element} */ (site.node)
+				const pendingKeys = pendingSpreadKeys.get(element)
+				const staleKey = getBindingKey(site.type, site.attributeName || '')
 				const parts = site.parts || []
 
 				let setAttribute = false
@@ -1033,14 +1251,17 @@ class TemplateInstance {
 				// Mixed content - always truthy (has both static and dynamic parts)
 				else setAttribute = true
 
-				if (!site.skipEqualityCheck && site.lastValue === setAttribute) continue // No change
+				if (!pendingKeys?.has(staleKey) && !site.skipEqualityCheck && site.lastValue === setAttribute) continue // No change
 
 				if (setAttribute) element.setAttribute(site.attributeName || '', '')
 				else element.removeAttribute(site.attributeName || '')
 
 				site.lastValue = setAttribute
+				pendingKeys?.delete(staleKey)
 			} else if (site.type === 'property') {
 				const element = /** @type {Element} */ (site.node)
+				const pendingKeys = pendingSpreadKeys.get(element)
+				const staleKey = getBindingKey(site.type, site.attributeName || '')
 				const parts = site.parts || []
 
 				let propValue
@@ -1056,14 +1277,17 @@ class TemplateInstance {
 					propValue = joinPartsWithValues(parts, processedValues)
 				}
 
-				if (!site.skipEqualityCheck && site.lastValue === propValue) continue // No change
+				if (!pendingKeys?.has(staleKey) && !site.skipEqualityCheck && site.lastValue === propValue) continue // No change
 
 				const propName = site.attributeName || ''
 				const anyElement = /** @type {any} */ (element)
 				anyElement[propName] = propValue
 				site.lastValue = propValue
+				pendingKeys?.delete(staleKey)
 			} else if (site.type === 'event') {
 				const element = /** @type {Element} */ (site.node)
+				const pendingKeys = pendingSpreadKeys.get(element)
+				const staleKey = getBindingKey(site.type, site.attributeName || '')
 				const parts = site.parts || []
 				const eventName = site.attributeName || ''
 
@@ -1080,45 +1304,20 @@ class TemplateInstance {
 				}
 
 				// Only update event handler if it has changed
-				if (!site.skipEqualityCheck && site.lastValue === inputValue) continue // No change
+				if (!pendingKeys?.has(staleKey) && !site.skipEqualityCheck && site.lastValue === inputValue) continue // No change
 
-				// Determine the actual event listener to use
-				let eventListener
-				// Pure interpolation - pattern is ['', number, '']
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number') {
-					// Pure interpolation
-					if (typeof inputValue === 'function') eventListener = inputValue
-					else if (typeof inputValue === 'string')
-						eventListener = /** @type {EventListener} */ (new Function('event', inputValue))
-					else if (inputValue == null || inputValue === '' || inputValue === false) eventListener = null
-					else throw new TypeError(`Event handler for ${eventName} must be a function or string`)
-				} else {
-					// Mixed content - treat as code string
-					const handlerCode = joinPartsWithValues(parts, values)
-					if (handlerCode.trim() === '') eventListener = null
-					else eventListener = /** @type {EventListener} */ (new Function('event', handlerCode))
-				}
-
-				// Optimized event handler management
-				if (eventListener) {
-					// We have a valid event listener
-					if (!site.internalHandler) {
-						// Create a stable wrapper function that calls the current handler
-						site.internalHandler = /** @type {EventListener} */ (event => site.currentEventListener?.(event))
-						element.addEventListener(eventName, site.internalHandler)
-					}
-					// Update the current handler reference (no DOM manipulation needed)
-					site.currentEventListener = /** @type {EventListener} */ (eventListener)
-				} else {
-					// We have a falsy event listener, remove the internal handler if it exists
-					if (site.internalHandler) {
-						element.removeEventListener(eventName, site.internalHandler)
-						site.internalHandler = undefined
-						site.currentEventListener = undefined
-					}
-				}
+				updateEventHandler(element, eventName, site, inputValue)
 
 				site.lastValue = inputValue
+				pendingKeys?.delete(staleKey)
+			} else if (site.type === 'spread') {
+				const spreadKeys = applyPreparedSpreadSite(site)
+				if (spreadKeys.length) {
+					const element = /** @type {Element} */ (site.node)
+					let elementKeys = pendingSpreadKeys.get(element)
+					if (!elementKeys) pendingSpreadKeys.set(element, (elementKeys = new Set()))
+					for (const spreadKey of spreadKeys) elementKeys.add(spreadKey)
+				}
 			}
 		}
 	}
@@ -1134,7 +1333,7 @@ class TemplateInstance {
  *
  * @typedef {{
  *   node: Element | Text,
- *   type: 'text'|'attribute'|'event'|'boolean-attribute'|'property',
+ *   type: 'text'|'attribute'|'event'|'boolean-attribute'|'property'|'spread',
  *   attributeName?: string,
  *   parts?: Array<string | number>,
  *   interpolationIndex?: number,
@@ -1142,6 +1341,8 @@ class TemplateInstance {
  *   lastValue?: unknown,
  *   internalHandler?: EventListener,
  *   currentEventListener?: EventListener,
+ *   preparedValue?: unknown,
+ *   spreadHandlers?: Map<string, { currentEventListener?: EventListener, internalHandler?: EventListener }>,
  *   skipEqualityCheck?: boolean,
  *   requiresUnwrapping?: boolean
  * }} InterpolationSite

@@ -160,6 +160,71 @@ describe('html template function', () => {
 		assertTrue(section.childNodes[4] instanceof Text, 'Inserted trailing child should be a text node')
 	})
 
+	it('supports spread syntax in template order and removes stale keys', () => {
+		const key = Symbol()
+		let clicks = 0
+		let spread = /** @type {Record<string, unknown>} */ ({
+			'.foo': 'spread foo',
+			'.bar': 'spread bar',
+			'@click': () => clicks++,
+			'?hidden': true,
+			title: 'from spread',
+		})
+
+		const render = () =>
+			/** @type {[HTMLButtonElement]} */ (
+				html`<button .foo=${'before'} ...${spread} .bar=${'after'} ?hidden=${false}></button>`(key)
+			)
+
+		const [button] = render()
+		const anyButton = /** @type {any} */ (button)
+
+		assertEquals(anyButton.foo, 'spread foo', 'Spread should override earlier explicit properties')
+		assertEquals(anyButton.bar, 'after', 'Later explicit properties should override spread values')
+		assertEquals(button.getAttribute('title'), 'from spread', 'Spread should set regular attributes')
+		assertEquals(button.hasAttribute('hidden'), false, 'Later explicit boolean attributes should override spread values')
+
+		button.click()
+		assertEquals(clicks, 1, 'Spread should attach event listeners')
+
+		spread = {'.bar': 'next spread bar'}
+		render()
+
+		assertEquals(anyButton.foo, 'before', 'Removing a spread property should reveal earlier explicit values')
+		assertEquals(anyButton.bar, 'after', 'Later explicit values should still win after re-render')
+		assertEquals(button.getAttribute('title'), null, 'Removing a spread attribute should remove it from the element')
+
+		button.click()
+		assertEquals(clicks, 1, 'Removing a spread event should detach its listener')
+	})
+
+	it('pseudo-hydrates spread events and custom props without clobbering native state', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '<spread-hydrate-el title="live"></spread-hydrate-el><button title="live"></button>'
+		const liveCustom = /** @type {HTMLElement} */ (container.childNodes[0])
+		const liveButton = /** @type {HTMLButtonElement} */ (container.childNodes[1])
+		const key = Symbol()
+		let eventsFired = 0
+
+		const [custom, button] = /** @type {[HTMLElement, HTMLButtonElement]} */ (
+			html`
+				<spread-hydrate-el ...${{'.foo': 'bar', '@ping': () => eventsFired++, title: 'live'}}></spread-hydrate-el>
+				<button ...${{'.foo': 'bar', '@click': () => eventsFired++, title: 'live'}}></button>
+			`(key, Array.from(container.childNodes))
+		)
+
+		assertEquals(custom, liveCustom, 'Hydration should reuse the existing custom element')
+		assertEquals(button, liveButton, 'Hydration should reuse the existing native element')
+		assertEquals(/** @type {any} */ (custom).foo, 'bar', 'Hydration should initialize custom element props from spread')
+		assertEquals(custom.getAttribute('title'), 'live', 'Hydration should preserve native attributes on custom elements')
+		assertEquals(/** @type {any} */ (button).foo, undefined, 'Hydration should skip native props from spread')
+		assertEquals(button.getAttribute('title'), 'live', 'Hydration should preserve native attributes on standard elements')
+
+		custom.dispatchEvent(new Event('ping'))
+		button.click()
+		assertEquals(eventsFired, 2, 'Hydration should attach spread event listeners')
+	})
+
 	it('returns different instances for different keys', () => {
 		const key1 = Symbol()
 		const key2 = Symbol()
