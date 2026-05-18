@@ -137,6 +137,9 @@ const INTERPOLATION_MARKER = '⧙⧘'
 
 /** RegExp for matching interpolation markers */
 const INTERPOLATION_REGEXP = new RegExp(`${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
+const SPREAD_INTERPOLATION_REGEXP = new RegExp(`^\\.\\.\\.${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
+const SPREAD_PLACEHOLDER_ATTR_PREFIX = `x-${INTERPOLATION_MARKER}spread-`
+const SPREAD_PLACEHOLDER_ATTR_REGEXP = new RegExp(`^${SPREAD_PLACEHOLDER_ATTR_PREFIX}(\\d+)${INTERPOLATION_MARKER}$`)
 
 /** Regex for finding HTML opening/self-closing tags */
 const HTML_TAG_REGEXP = /<[^<>]*?\/?>/g
@@ -245,9 +248,10 @@ class Template {
 		//    case-insensitive, while still preserving the original case for JS
 		//    property names so we can set them correctly on the elements.
 
-		// Scan for HTML tags and process .property attributes within each tag
+		// Scan for HTML tags and process spread/.property attributes within each tag
 		htmlString = htmlString.replace(HTML_TAG_REGEXP, tagMatch => {
-			// Parse the tag content more carefully to avoid matching dots inside quoted attribute values
+			// Parse the tag content more carefully to avoid matching spread/property
+			// syntax inside quoted attribute values.
 			const parts = []
 			let lastIndex = 0
 			let inQuotes = false
@@ -264,6 +268,15 @@ class Template {
 					inQuotes = false
 					quoteChar = ''
 				} else if (!inQuotes && i > 0 && /\s/.test(tagMatch[i - 1])) {
+					const spreadMatch = tagMatch.slice(i).match(SPREAD_INTERPOLATION_REGEXP)
+					if (spreadMatch) {
+						parts.push(tagMatch.slice(lastIndex, i))
+						parts.push(`${SPREAD_PLACEHOLDER_ATTR_PREFIX}${spreadMatch[1]}${INTERPOLATION_MARKER}=""`)
+						lastIndex = i + spreadMatch[0].length
+						i = lastIndex - 1
+						continue
+					}
+
 					// Detect attribute patterns when preceded by whitespace and not in quotes
 					let prefix = null
 
@@ -513,6 +526,7 @@ function findInterpolationSites(fragment, caseMappings) {
 			}
 		} else if (node.nodeType === Node.ELEMENT_NODE) {
 			const element = /** @type {Element} */ (node)
+			const elementState = {}
 
 			// A list of placeholder attributes to remove after finding
 			// interpolation sites (f.e. !foo="" is removed, as it will be set
@@ -522,8 +536,20 @@ function findInterpolationSites(fragment, caseMappings) {
 			for (const attr of element.attributes) {
 				const name = attr.name
 				const value = attr.value
+				const spreadMatch = name.match(SPREAD_PLACEHOLDER_ATTR_REGEXP)
 
-				// Handle both interpolated and static special attributes, plus regular attributes marked with !
+				if (spreadMatch) {
+					sites.push({
+						node: element,
+						type: /** @type {'spread'} */ ('spread'),
+						interpolationIndex: parseInt(spreadMatch[1]),
+						elementState,
+					})
+					attributesToRemove.push(name)
+					continue
+				}
+
+				// Handle interpolated attrs, static special attrs, and regular attrs marked with !.
 				if (
 					value.includes(INTERPOLATION_MARKER) ||
 					name.startsWith('?') ||
@@ -563,12 +589,21 @@ function findInterpolationSites(fragment, caseMappings) {
 					}
 
 					/** @type {InterpolationSite} */
-					const site = {node: element, type, attributeName: processedName, parts: parsedParts, skipEqualityCheck}
+					const site = {
+						node: element,
+						type,
+						attributeName: processedName,
+						parts: parsedParts,
+						skipEqualityCheck,
+						elementState,
+					}
 
 					sites.push(site)
 
 					// Remove the template attribute, it will be set dynamically later
 					attributesToRemove.push(name)
+				} else {
+					sites.push({node: element, type: 'attribute', attributeName: name, parts: [value], elementState})
 				}
 			}
 
@@ -614,6 +649,66 @@ function getStableNestedKey(site, index) {
 }
 
 /**
+ * @param {'attribute'|'boolean-attribute'|'property'|'event'} type
+ * @param {string} name
+ */
+function getBindingKey(type, name) {
+	if (type === 'boolean-attribute') return `?${name}`
+	if (type === 'property') return `.${name}`
+	if (type === 'event') return `@${name}`
+	return name
+}
+
+/**
+ * @param {Element} element
+ * @param {string} eventName
+ * @param {{ internalHandler?: EventListener, currentEventListener?: EventListener }} state
+ * @param {unknown} inputValue
+ */
+function updateEventHandler(element, eventName, state, inputValue) {
+	let eventListener
+	if (typeof inputValue === 'function') eventListener = /** @type {EventListener} */ (inputValue)
+	else if (typeof inputValue === 'string') eventListener = /** @type {EventListener} */ (new Function('event', inputValue))
+	else if (inputValue == null || inputValue === '' || inputValue === false) eventListener = null
+	else throw new TypeError(`Event handler for ${eventName} must be a function or string`)
+
+	if (eventListener) {
+		if (!state.internalHandler) {
+			state.internalHandler = /** @type {EventListener} */ (event => state.currentEventListener?.(event))
+			element.addEventListener(eventName, state.internalHandler)
+		}
+		state.currentEventListener = eventListener
+		return true
+	}
+
+	if (state.internalHandler) {
+		element.removeEventListener(eventName, state.internalHandler)
+		state.internalHandler = undefined
+		state.currentEventListener = undefined
+	}
+
+	return false
+}
+
+const ATTRIBUTE_SITE_ERROR =
+	'Nested templates and DOM elements are not allowed in attributes. Use text content interpolation instead.'
+
+/**
+ * @param {InterpolationSite} site
+ * @param {InterpolationValue[]} values
+ */
+function resolveSiteValue(site, values) {
+	const parts = site.parts || []
+
+	if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
+		return handleForceValue(site, values[parts[1]])
+
+	const processedValues = [...values]
+	for (const part of parts) if (typeof part === 'number') processedValues[part] = handleForceValue(site, values[part])
+	return joinPartsWithValues(parts, processedValues)
+}
+
+/**
  * Reconcile one ordered list of DOM nodes to another using strict node
  * identity. This keeps the cheap fast paths for matching heads/tails and
  * adjacent head/tail swaps, and otherwise replaces the unmatched middle.
@@ -641,18 +736,18 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(node, endBoundaryNode)
 				else parentNode.insertBefore(node, endBoundaryNode)
 			}
-		// fast path to remove head or tail
+			// fast path to remove head or tail
 		} else if (newEnd === newStart) {
 			while (oldStart < oldEnd) /** @type {ChildNode} */ (oldNodes[oldStart++]).remove()
-		// fast path for same head
+			// fast path for same head
 		} else if (oldNodes[oldStart] === newNodes[newStart]) {
 			oldStart++
 			newStart++
-		// fast path for same tail
+			// fast path for same tail
 		} else if (oldNodes[oldEnd - 1] === newNodes[newEnd - 1]) {
 			oldEnd--
 			newEnd--
-		// fast path for swaps
+			// fast path for swaps
 		} else if (
 			oldStart < oldEnd - 1 &&
 			newStart < newEnd - 1 &&
@@ -686,7 +781,7 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldEndNode, startInsertBefore)
 				else parentNode.insertBefore(oldEndNode, startInsertBefore)
 			}
-		// slow path for the unmatched middle
+			// slow path for the unmatched middle
 		} else {
 			// To keep it simple, just (re-)insert the unmatched middle before endBoundary.
 			const lastSettledNode = newNodes[newStart - 1] || null
@@ -702,11 +797,11 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 			// [potentially some new nodes][remnant old nodes][new nodes][endBoundary]
 			// The remnant old nodes must be removed. We noted down lastSettledNode and
 			// firstPendingNode, so everything in between can be removed.
-			let node = lastSettledNode
-				? lastSettledNode.nextSibling
-				: startBoundaryNode
-					? startBoundaryNode.nextSibling
-					: parentNode.firstChild
+				let node = lastSettledNode
+					? lastSettledNode.nextSibling
+					: startBoundaryNode
+						? startBoundaryNode.nextSibling
+						: parentNode.firstChild
 			while (node && node !== firstPendingNode) {
 				const nextSibling = node.nextSibling
 				;(/** @type {ChildNode} */ (node)).remove()
@@ -818,8 +913,7 @@ function canHydrateNode(liveNode, targetNode) {
 		|| liveElement.attributes.length !== targetElement.attributes.length
 	) return false
 
-	for (const attr of targetElement.attributes)
-		if (liveElement.getAttribute(attr.name) !== attr.value) return false
+	for (const attr of targetElement.attributes) if (liveElement.getAttribute(attr.name) !== attr.value) return false
 
 	return true
 }
@@ -891,16 +985,16 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 
 		if (liveNode.nodeType === Node.TEXT_NODE || liveNode.nodeType === Node.CDATA_SECTION_NODE) {
 			if (liveNode.nodeValue !== targetNode.nodeValue) liveNode.nodeValue = targetNode.nodeValue
-			} else if (liveNode.nodeType === Node.ELEMENT_NODE) {
-				const liveElement = /** @type {Element} */ (liveNode)
-				reconcileHydrationNodes(
-					liveElement,
-					Array.from(liveElement.childNodes),
-					Array.from(targetNode.childNodes),
-					adoptionMap,
-					null,
-				)
-			}
+		} else if (liveNode.nodeType === Node.ELEMENT_NODE) {
+			const liveElement = /** @type {Element} */ (liveNode)
+			reconcileHydrationNodes(
+				liveElement,
+				Array.from(liveElement.childNodes),
+				Array.from(targetNode.childNodes),
+				adoptionMap,
+				null,
+			)
+		}
 
 		liveIndex++
 		targetIndex++
@@ -929,37 +1023,35 @@ class TemplateInstance {
 	 * @param {Map<Node, Node>} adoptionMap
 	 */
 	absorb(adoptionMap) {
-		this.nodes = /** @type {TemplateNodes} */ (Object.freeze(
-			this.nodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node))
-		))
+		this.nodes = /** @type {TemplateNodes} */ (
+			Object.freeze(this.nodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node)))
+		)
+		const reboundElementStates = new WeakSet()
 		for (const site of this.sites) {
 			const previousNode = site.node
 			const node = /** @type {Element | Text} */ (adoptionMap.get(site.node) || site.node)
-			
-			// If an event site moved to a different adopted node, detach the old wrapper
-			// before we retarget the site bookkeeping.
-			if (site.type === 'event' && site.internalHandler && node !== previousNode)
-				previousNode.removeEventListener(site.attributeName || '', site.internalHandler)
-			
+
 			site.node = node
 			if (site.insertedNodes)
-				site.insertedNodes = site.insertedNodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node))
-			
-			// attach event listeners and for custom elements initialize props
-			if (site.type === 'event') {
-				if (node !== previousNode) site.internalHandler = undefined
-				else continue
-			} else if (site.type === 'property') {
-				const element = /** @type {Element} */ (site.node)
-				if (element.localName.includes('-')) /** @type {any} */ (element)[site.attributeName || ''] = site.lastValue
-				continue
+				site.insertedNodes = site.insertedNodes.map(
+					node => /** @type {Element | Text} */ (adoptionMap.get(node) || node),
+				)
+
+			const elementState = site.elementState
+			if (!elementState || node === previousNode || reboundElementStates.has(elementState)) continue
+
+			for (const [eventName, eventState] of elementState.eventBindings || []) {
+				if (eventState.internalHandler) previousNode.removeEventListener(eventName, eventState.internalHandler)
+				eventState.internalHandler = undefined
+				if (eventState.currentEventListener)
+					updateEventHandler(/** @type {Element} */ (node), eventName, eventState, eventState.currentEventListener)
 			}
 
-			if (site.type === 'event' && site.currentEventListener && !site.internalHandler) {
-				const element = /** @type {Element} */ (site.node)
-				site.internalHandler = /** @type {EventListener} */ (event => site.currentEventListener?.(event))
-				element.addEventListener(site.attributeName || '', site.internalHandler)
-			}
+			if (/** @type {Element} */ (node).localName.includes('-'))
+				for (const binding of elementState.lastBindings?.values() || [])
+					if (binding.type === 'property') /** @type {any} */ (node)[binding.attributeName] = binding.value
+
+			reboundElementStates.add(elementState)
 		}
 		return this
 	}
@@ -970,18 +1062,130 @@ class TemplateInstance {
 	 */
 	applyValues(values) {
 		const sites = this.sites
+		let currentElement = null
+		let currentElementState = null
+		let currentBindings = null
+
+		const flushElementBindings = () => {
+			if (!currentElement || !currentElementState || !currentBindings) return
+
+			const element = /** @type {Element} */ (currentElement)
+			const anyElement = /** @type {any} */ (element)
+			const lastBindings = currentElementState.lastBindings || new Map()
+			const eventBindings = currentElementState.eventBindings || new Map()
+
+			for (const [key, binding] of lastBindings) {
+				if (currentBindings.has(key)) continue
+
+				if (binding.type === 'event') {
+					const eventState = eventBindings.get(binding.attributeName)
+					if (eventState) {
+						if (eventState.internalHandler)
+							element.removeEventListener(binding.attributeName, eventState.internalHandler)
+						eventBindings.delete(binding.attributeName)
+					}
+				} else if (binding.type === 'property') {
+					anyElement[binding.attributeName] = undefined
+				} else element.removeAttribute(binding.attributeName)
+			}
+
+			for (const [key, binding] of currentBindings) {
+				const previous = lastBindings.get(key)
+				if (
+					!binding.force &&
+					previous &&
+					previous.type === binding.type &&
+					previous.attributeName === binding.attributeName &&
+					previous.value === binding.value
+				)
+					continue
+
+				if (binding.type === 'event') {
+					let eventState = eventBindings.get(binding.attributeName)
+					if (!eventState) eventBindings.set(binding.attributeName, (eventState = {}))
+					updateEventHandler(element, binding.attributeName, eventState, binding.value)
+				} else if (binding.type === 'property') {
+					anyElement[binding.attributeName] = binding.value
+				} else if (binding.type === 'boolean-attribute') {
+					if (binding.value) element.setAttribute(binding.attributeName, '')
+					else element.removeAttribute(binding.attributeName)
+				} else {
+					element.setAttribute(binding.attributeName, binding.value)
+				}
+			}
+
+			currentElementState.lastBindings = currentBindings
+			currentElementState.eventBindings = eventBindings.size ? eventBindings : undefined
+			currentElement = null
+			currentElementState = currentBindings = null
+		}
 
 		for (const site of sites) {
 			if (site.type === 'text') {
+				flushElementBindings()
 				// With pre-split text nodes, each text site corresponds to exactly one interpolation
 				const value = values[/** @type {number} */ (site.interpolationIndex)]
 				interpolateTextSite(site, value)
-			} else if (site.type === 'attribute') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
+				continue
+			}
 
-				// Handle force detection and unwrapping for attribute values
-				// Check each interpolated value and handle force detection
+			const element = /** @type {Element} */ (site.node)
+			if (element !== currentElement) {
+				flushElementBindings()
+				currentElement = element
+				currentElementState = site.elementState
+				currentBindings = new Map()
+			}
+
+			const parts = site.parts || []
+			if (site.type === 'spread') {
+				const spreadValue = handleForceValue(site, values[/** @type {number} */ (site.interpolationIndex)])
+				if (
+					spreadValue == null ||
+					spreadValue === false ||
+					typeof spreadValue !== 'object' ||
+					Array.isArray(spreadValue) ||
+					spreadValue instanceof Node
+				)
+					continue
+
+				for (const [name, inputValue] of Object.entries(spreadValue)) {
+					/** @type {'attribute'|'boolean-attribute'|'property'|'event'} */
+					let type = 'attribute'
+					let attributeName = name
+					let bindingValue = inputValue
+
+					if (name.startsWith('?')) {
+						type = 'boolean-attribute'
+						attributeName = name.slice(1)
+						bindingValue = !!inputValue
+					} else if (name.startsWith('.')) {
+						type = 'property'
+						attributeName = name.slice(1)
+					} else if (name.startsWith('@')) {
+						type = 'event'
+						attributeName = name.slice(1)
+						if (inputValue == null || inputValue === '' || inputValue === false) {
+							currentBindings.delete(getBindingKey(type, attributeName))
+							continue
+						}
+					} else {
+						if (inputValue instanceof Node || Array.isArray(inputValue) || typeof inputValue === 'function')
+							throw new Error(ATTRIBUTE_SITE_ERROR)
+						bindingValue = String(inputValue ?? '')
+					}
+
+					currentBindings.set(getBindingKey(type, attributeName), {
+						type,
+						attributeName,
+						value: bindingValue,
+						force: site.skipEqualityCheck,
+					})
+				}
+				continue
+			}
+
+			if (site.type === 'attribute') {
 				const attributeValues = parts
 					.filter(part => typeof part === 'number')
 					.map(part => {
@@ -1000,127 +1204,68 @@ class TemplateInstance {
 						return value
 					})
 
-				if (!site.skipEqualityCheck && arrayEquals(/** @type {unknown[]} */ (site.lastValue), attributeValues)) continue // No change
+				if (attributeValues.some(value => value instanceof Node || Array.isArray(value) || typeof value === 'function'))
+					throw new Error(ATTRIBUTE_SITE_ERROR)
 
-				// Check if any attribute value would produce DOM nodes - not allowed in attributes
-				if (
-					attributeValues.some(value => value instanceof Node || Array.isArray(value) || typeof value === 'function')
-				) {
-					throw new Error(
-						'Nested templates and DOM elements are not allowed in attributes. Use text content interpolation instead.',
-					)
-				}
-
-				// Create values array with unwrapped values for string joining
 				const processedValues = [...values]
 				let attributeValueIndex = 0
 				for (const part of parts)
 					if (typeof part === 'number') processedValues[part] = attributeValues[attributeValueIndex++]
 
-				const newAttributeValue = joinPartsWithValues(parts, processedValues)
-				element.setAttribute(site.attributeName || '', newAttributeValue)
-				site.lastValue = attributeValues
-			} else if (site.type === 'boolean-attribute') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
+				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
+					type: site.type,
+					attributeName: site.attributeName || '',
+					value: joinPartsWithValues(parts, processedValues),
+					force: site.skipEqualityCheck,
+				})
+				continue
+			}
 
+			if (site.type === 'boolean-attribute') {
 				let setAttribute = false
-				// Pure interpolation - pattern is ['', number, '']
 				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
 					setAttribute = !!handleForceValue(site, values[parts[1]])
-				// Static content - single string part
 				else if (parts.length === 1 && typeof parts[0] === 'string') setAttribute = parts[0].trim() !== ''
-				// Mixed content - always truthy (has both static and dynamic parts)
 				else setAttribute = true
 
-				if (!site.skipEqualityCheck && site.lastValue === setAttribute) continue // No change
-
-				if (setAttribute) element.setAttribute(site.attributeName || '', '')
-				else element.removeAttribute(site.attributeName || '')
-
-				site.lastValue = setAttribute
-			} else if (site.type === 'property') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
-
-				let propValue
-				// Pure interpolation - pattern is ['', number, '']
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-					propValue = handleForceValue(site, values[parts[1]])
-				// Mixed content or static content
-				else {
-					// For mixed content, we need to handle force for each interpolated part
-					const processedValues = [...values]
-					for (const part of parts)
-						if (typeof part === 'number') processedValues[part] = handleForceValue(site, values[part])
-					propValue = joinPartsWithValues(parts, processedValues)
-				}
-
-				if (!site.skipEqualityCheck && site.lastValue === propValue) continue // No change
-
-				const propName = site.attributeName || ''
-				const anyElement = /** @type {any} */ (element)
-				anyElement[propName] = propValue
-				site.lastValue = propValue
-			} else if (site.type === 'event') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
-				const eventName = site.attributeName || ''
-
-				// Determine the current handler value for comparison
-				let inputValue
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-					inputValue = handleForceValue(site, values[parts[1]])
-				else {
-					// For mixed content, handle force for each interpolated part
-					const processedValues = [...values]
-					for (const part of parts)
-						if (typeof part === 'number') processedValues[part] = handleForceValue(site, values[part])
-					inputValue = joinPartsWithValues(parts, processedValues)
-				}
-
-				// Only update event handler if it has changed
-				if (!site.skipEqualityCheck && site.lastValue === inputValue) continue // No change
-
-				// Determine the actual event listener to use
-				let eventListener
-				// Pure interpolation - pattern is ['', number, '']
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number') {
-					// Pure interpolation
-					if (typeof inputValue === 'function') eventListener = inputValue
-					else if (typeof inputValue === 'string')
-						eventListener = /** @type {EventListener} */ (new Function('event', inputValue))
-					else if (inputValue == null || inputValue === '' || inputValue === false) eventListener = null
-					else throw new TypeError(`Event handler for ${eventName} must be a function or string`)
-				} else {
-					// Mixed content - treat as code string
-					const handlerCode = joinPartsWithValues(parts, values)
-					if (handlerCode.trim() === '') eventListener = null
-					else eventListener = /** @type {EventListener} */ (new Function('event', handlerCode))
-				}
-
-				// Optimized event handler management
-				if (eventListener) {
-					// We have a valid event listener
-					if (!site.internalHandler) {
-						// Create a stable wrapper function that calls the current handler
-						site.internalHandler = /** @type {EventListener} */ (event => site.currentEventListener?.(event))
-						element.addEventListener(eventName, site.internalHandler)
-					}
-					// Update the current handler reference (no DOM manipulation needed)
-					site.currentEventListener = /** @type {EventListener} */ (eventListener)
-				} else {
-					// We have a falsy event listener, remove the internal handler if it exists
-					if (site.internalHandler) {
-						element.removeEventListener(eventName, site.internalHandler)
-						site.internalHandler = undefined
-						site.currentEventListener = undefined
-					}
-				}
-
-				site.lastValue = inputValue
+				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
+					type: site.type,
+					attributeName: site.attributeName || '',
+					value: setAttribute,
+					force: site.skipEqualityCheck,
+				})
+				continue
 			}
+
+			if (site.type === 'property') {
+				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
+					type: site.type,
+					attributeName: site.attributeName || '',
+					value: resolveSiteValue(site, values),
+					force: site.skipEqualityCheck,
+				})
+				continue
+			}
+
+			const eventName = site.attributeName || ''
+			let inputValue = resolveSiteValue(site, values)
+			if (typeof inputValue === 'string' && inputValue.trim() === '') inputValue = null
+
+			const bindingKey = getBindingKey(site.type, eventName)
+			if (inputValue == null || inputValue === '' || inputValue === false) {
+				currentBindings.delete(bindingKey)
+				continue
+			}
+
+			currentBindings.set(bindingKey, {
+				type: site.type,
+				attributeName: eventName,
+				value: inputValue,
+				force: site.skipEqualityCheck,
+			})
 		}
+
+		flushElementBindings()
 	}
 }
 
@@ -1134,14 +1279,13 @@ class TemplateInstance {
  *
  * @typedef {{
  *   node: Element | Text,
- *   type: 'text'|'attribute'|'event'|'boolean-attribute'|'property',
+ *   type: 'text'|'attribute'|'event'|'boolean-attribute'|'property'|'spread',
  *   attributeName?: string,
  *   parts?: Array<string | number>,
  *   interpolationIndex?: number,
  *   insertedNodes?: (Element | Text)[],
  *   lastValue?: unknown,
- *   internalHandler?: EventListener,
- *   currentEventListener?: EventListener,
+ *   elementState?: { lastBindings?: Map<string, { type: 'attribute'|'boolean-attribute'|'property'|'event', attributeName: string, value: unknown, force?: boolean }>, eventBindings?: Map<string, { currentEventListener?: EventListener, internalHandler?: EventListener }> },
  *   skipEqualityCheck?: boolean,
  *   requiresUnwrapping?: boolean
  * }} InterpolationSite
