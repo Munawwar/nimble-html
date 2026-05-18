@@ -613,6 +613,111 @@ function getStableNestedKey(site, index) {
 	return key
 }
 
+/**
+ * Reconcile one ordered list of DOM nodes to another using strict node
+ * identity. This keeps the cheap fast paths for matching heads/tails and
+ * adjacent head/tail swaps, and otherwise replaces the unmatched middle.
+ *
+ * @param {Element | DocumentFragment | Document} parentNode
+ * @param {Node[]} oldNodes
+ * @param {Node[]} newNodes
+ * @param {Node | null} [endBoundaryNode]
+ * @returns {Node[]}
+ */
+function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
+	let oldStart = 0
+	let oldEnd = oldNodes.length
+	let newStart = 0
+	let newEnd = newNodes.length
+	const startBoundaryNode = oldNodes[0]?.previousSibling || endBoundaryNode?.previousSibling || null
+
+	// Thanks to https://github.com/WebReflection/udomdiff for the fast path inspiration.
+	while (oldStart < oldEnd || newStart < newEnd) {
+		// fast path to append head or tail
+		if (oldEnd === oldStart) {
+			while (newStart < newEnd) {
+				const node = newNodes[newStart++]
+				if ('moveBefore' in parentNode && node.parentNode === parentNode)
+					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(node, endBoundaryNode)
+				else parentNode.insertBefore(node, endBoundaryNode)
+			}
+		// fast path to remove head or tail
+		} else if (newEnd === newStart) {
+			while (oldStart < oldEnd) /** @type {ChildNode} */ (oldNodes[oldStart++]).remove()
+		// fast path for same head
+		} else if (oldNodes[oldStart] === newNodes[newStart]) {
+			oldStart++
+			newStart++
+		// fast path for same tail
+		} else if (oldNodes[oldEnd - 1] === newNodes[newEnd - 1]) {
+			oldEnd--
+			newEnd--
+		// fast path for swaps
+		} else if (
+			oldStart < oldEnd - 1 &&
+			newStart < newEnd - 1 &&
+			oldNodes[oldStart] === newNodes[newEnd - 1] &&
+			oldNodes[oldEnd - 1] === newNodes[newStart]
+		) {
+			// Adjacent head/tail swaps are common enough to be worth a dedicated
+			// fast path. This also handles patterns like:
+			//          ↓     ↓
+			// old: [1, 2, 3, 4, 5]
+			//          ↓     ↓
+			// new: [1, 4, 3, 2, 5]
+			//
+			// or another case:
+			//                ↓  ↓
+			// old: [1, 2, 3, 4, 5]
+			//                ↓     ↓
+			// new: [1, 2, 3, 5, 6, 4]
+			newStart++
+			newEnd--
+			const oldStartNode = oldNodes[oldStart++]
+			const oldEndNode = oldNodes[--oldEnd]
+			const startInsertBefore = oldStartNode.nextSibling
+			if ('moveBefore' in parentNode && oldStartNode.parentNode === parentNode)
+				/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldStartNode, oldEndNode.nextSibling)
+			else parentNode.insertBefore(oldStartNode, oldEndNode.nextSibling)
+			// If the two nodes were adjacent siblings then they are already swapped
+			// now, so ignore that case.
+			if (startInsertBefore !== oldEndNode) {
+				if ('moveBefore' in parentNode && oldEndNode.parentNode === parentNode)
+					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldEndNode, startInsertBefore)
+				else parentNode.insertBefore(oldEndNode, startInsertBefore)
+			}
+		// slow path for the unmatched middle
+		} else {
+			// To keep it simple, just (re-)insert the unmatched middle before endBoundary.
+			const lastSettledNode = newNodes[newStart - 1] || null
+			const endBoundary = newNodes[newEnd] || endBoundaryNode
+			const firstPendingNode = newNodes[newStart] || endBoundary
+			while (newStart < newEnd) {
+				const node = newNodes[newStart++]
+				if ('moveBefore' in parentNode && node.parentNode === parentNode)
+					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(node, endBoundary)
+				else parentNode.insertBefore(node, endBoundary)
+			}
+			// DOM should look like this now:
+			// [potentially some new nodes][remnant old nodes][new nodes][endBoundary]
+			// The remnant old nodes must be removed. We noted down lastSettledNode and
+			// firstPendingNode, so everything in between can be removed.
+			let node = lastSettledNode
+				? lastSettledNode.nextSibling
+				: startBoundaryNode
+					? startBoundaryNode.nextSibling
+					: parentNode.firstChild
+			while (node && node !== firstPendingNode) {
+				const nextSibling = node.nextSibling
+				;(/** @type {ChildNode} */ (node)).remove()
+				node = nextSibling
+			}
+		}
+	}
+
+	return newNodes
+}
+
 function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {InterpolationValue} */ value) {
 	// Handle force detection and unwrapping
 	const unwrappedValue = handleForceValue(site, value)
@@ -623,7 +728,7 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 	// Handle simple text cases first (most common case)
 	if (!(unwrappedValue instanceof Node) && !Array.isArray(unwrappedValue) && typeof unwrappedValue !== 'function') {
 		// Simple text content, just set textContent
-		clearPreviousNodes(site)
+		if (site.insertedNodes) for (const node of site.insertedNodes) /** @type {ChildNode} */ (node).remove()
 		site.node.textContent = String(unwrappedValue ?? '')
 		site.insertedNodes = undefined
 	} else {
@@ -657,38 +762,20 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 				.filter(Boolean)
 		)
 
-		// TODO array reconciliation for better performance on large lists. For now, if any one item changes, we re-insert all nodes.
 		if (!site.skipEqualityCheck && site.insertedNodes && arrayEquals(site.insertedNodes, nodes)) return // No change
-		insertNodesAndUpdateSite(site, nodes)
-	}
-}
+		const parentNode = site.node.parentNode
+		if (!parentNode) {
+			site.node.textContent = ''
+			site.insertedNodes = nodes.length ? [...nodes] : undefined
+			return
+		}
 
-/**
- * Helper function to insert nodes and update site state
- * @param {InterpolationSite} site
- * @param {(Element | Text)[]} nodes
- */
-function insertNodesAndUpdateSite(site, nodes) {
-	clearPreviousNodes(site)
-
-	if (nodes.length > 0) {
-		// Insert all nodes before the text node
-		for (const node of nodes) site.node.parentNode?.insertBefore(node, site.node)
-		site.node.textContent = '' // Hide the text node
-		site.insertedNodes = [...nodes]
-	} else {
-		// No nodes to insert - set empty text content
+		const reconciledNodes = /** @type {(Element | Text)[]} */ (
+			reconcileDom(/** @type {Element | DocumentFragment | Document} */ (parentNode), site.insertedNodes || [], nodes, site.node)
+		)
 		site.node.textContent = ''
-		site.insertedNodes = undefined
+		site.insertedNodes = reconciledNodes.length ? reconciledNodes : undefined
 	}
-}
-
-/**
- * Helper function to clear previously inserted nodes
- * @param {InterpolationSite} site
- */
-function clearPreviousNodes(site) {
-	if (site.insertedNodes) for (const node of site.insertedNodes) /** @type {ChildNode} */ (node).remove()
 }
 
 /**

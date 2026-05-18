@@ -1074,7 +1074,6 @@ describe('html template function', () => {
 			</ul>`(key)
 		)
 		document.body.append(ul2)
-		console.log(...ul2.children)
 
 		assertEquals(ul2.children.length, 3, 'Should have 3 list items for nested arrays')
 		assertEquals(ul2.children[0].textContent, 'apple', 'First nested item should be "apple"')
@@ -1165,6 +1164,53 @@ describe('html template function', () => {
 		assertTrue(container.textContent.includes('42'), 'Should contain number as text')
 
 		container.remove()
+	})
+
+	it('reconciles node arrays without replacing settled siblings', async () => {
+		const key = Symbol()
+		const a = document.createElement('span')
+		const b = document.createElement('span')
+		const c = document.createElement('span')
+		const d = document.createElement('span')
+		a.textContent = 'a'
+		b.textContent = 'b'
+		c.textContent = 'c'
+		d.textContent = 'd'
+
+		/** @param {Node[]} items */
+		const render = items => /** @type {[HTMLDivElement]} */ (html`<div>${items}</div>`(key))
+
+		const [div] = render([a, b, c])
+		document.body.append(div)
+
+		/** @type {MutationRecord[]} */
+		const mutations = []
+		const observer = new MutationObserver(records => mutations.push(...records))
+		observer.observe(div, {childList: true})
+
+		const [div2] = render([a, b, c, d])
+		await Promise.resolve()
+		const children = Array.from(div.children)
+
+		assertEquals(div, div2, 'Should update the same container instance')
+		assertEquals(children.length, 4, 'Should append one new child')
+		assertEquals(children[0], a, 'Should preserve the first child')
+		assertEquals(children[1], b, 'Should preserve the second child')
+		assertEquals(children[2], c, 'Should preserve the third child')
+		assertEquals(children[3], d, 'Should append the new child at the end')
+		assertEquals(
+			mutations.reduce((count, mutation) => count + mutation.removedNodes.length, 0),
+			0,
+			'Should not remove settled siblings when appending',
+		)
+		assertEquals(
+			mutations.reduce((count, mutation) => count + mutation.addedNodes.length, 0),
+			1,
+			'Should only insert the appended child',
+		)
+
+		observer.disconnect()
+		div.remove()
 	})
 
 	it('handles case-sensitive property names', () => {
