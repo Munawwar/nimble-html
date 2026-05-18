@@ -3,3 +3,5 @@ node_modules/
 
 *.d.ts
 *.d.ts.map
+.types-generated/
+!html.d.ts
