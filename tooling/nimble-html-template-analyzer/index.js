@@ -37,6 +37,7 @@ function createAnalyzer(ts, program, sourceFile) {
 	}
 	let cachedDiagnostics = null
 	let cachedTemplateEntries = null
+	let cachedTemplateRanges = null
 
 	function getGlobalType(name) {
 		if (caches.globalTypes.has(name)) return caches.globalTypes.get(name)
@@ -380,22 +381,22 @@ function createAnalyzer(ts, program, sourceFile) {
 		return entries
 	}
 
-	function getNodeAtPosition(node, position) {
-		if (position < node.getFullStart() || position > node.getEnd()) return null
-		let match = node
-		ts.forEachChild(node, child => {
-			const childMatch = getNodeAtPosition(child, position)
-			if (childMatch) match = childMatch
-		})
-		return match
-	}
-
 	function getContainingTemplateEntry(position) {
-		for (let node = getNodeAtPosition(sourceFile, position); node; node = node.parent) {
-			if (!ts.isTaggedTemplateExpression(node)) continue
-			return getTemplateEntry(node)
+		if (!cachedTemplateRanges) {
+			cachedTemplateRanges = getTemplateEntries()
+				.map(entry => ({
+					entry,
+					start: entry.node.getStart(sourceFile),
+					end: entry.node.getEnd(),
+				}))
+				.sort((left, right) => left.start - right.start || right.end - left.end)
 		}
-		return null
+		let best = null
+		for (const range of cachedTemplateRanges) {
+			if (range.start > position) break
+			if (position <= range.end && (!best || (range.start >= best.start && range.end <= best.end))) best = range
+		}
+		return best?.entry || null
 	}
 
 	function getBindingExpectation(hole) {
