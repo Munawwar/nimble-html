@@ -28,17 +28,19 @@ function init(modules) {
 			}
 
 			proxy.getCompletionsAtPosition = (fileName, position, options, formattingSettings) => {
+				const program = languageService.getProgram()
+				const sourceFile = program?.getSourceFile(fileName)
+				if (!program || !sourceFile || sourceFile.isDeclarationFile)
+					return languageService.getCompletionsAtPosition(fileName, position, options, formattingSettings)
+				const analyzerCompletions = getCompletionsAtPosition(ts, program, sourceFile, position)
+				if (!analyzerCompletions?.entries.length)
+					return languageService.getCompletionsAtPosition(fileName, position, options, formattingSettings)
 				const baseCompletions = languageService.getCompletionsAtPosition(
 					fileName,
 					position,
 					options,
 					formattingSettings,
 				)
-				const program = languageService.getProgram()
-				const sourceFile = program?.getSourceFile(fileName)
-				if (!program || !sourceFile || sourceFile.isDeclarationFile) return baseCompletions
-				const analyzerCompletions = getCompletionsAtPosition(ts, program, sourceFile, position)
-				if (!analyzerCompletions?.entries.length) return baseCompletions
 				if (!baseCompletions) {
 					return {
 						isGlobalCompletion: false,
