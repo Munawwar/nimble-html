@@ -119,9 +119,9 @@ function handleTemplateTag(mode, strings, ...values) {
 					key,
 					/** @type {Element | ShadowRoot | DocumentFragment} */ (liveNodes[0]?.parentNode),
 					liveNodes,
-			  )
+				)
 			: template.updateInstance(key)
-	};
+	}
 	renderFn.template = template
 	return renderFn
 }
@@ -772,7 +772,10 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 			const oldEndNode = oldNodes[--oldEnd]
 			const startInsertBefore = oldStartNode.nextSibling
 			if ('moveBefore' in parentNode && oldStartNode.parentNode === parentNode)
-				/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldStartNode, oldEndNode.nextSibling)
+				/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(
+					oldStartNode,
+					oldEndNode.nextSibling,
+				)
 			else parentNode.insertBefore(oldStartNode, oldEndNode.nextSibling)
 			// If the two nodes were adjacent siblings then they are already swapped
 			// now, so ignore that case.
@@ -804,7 +807,8 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 						: parentNode.firstChild
 			while (node && node !== firstPendingNode) {
 				const nextSibling = node.nextSibling
-				;(/** @type {ChildNode} */ (node)).remove()
+				const removableNode = /** @type {ChildNode} */ (node)
+				removableNode.remove()
 				node = nextSibling
 			}
 		}
@@ -866,7 +870,12 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 		}
 
 		const reconciledNodes = /** @type {(Element | Text)[]} */ (
-			reconcileDom(/** @type {Element | DocumentFragment | Document} */ (parentNode), site.insertedNodes || [], nodes, site.node)
+			reconcileDom(
+				/** @type {Element | DocumentFragment | Document} */ (parentNode),
+				site.insertedNodes || [],
+				nodes,
+				site.node,
+			)
 		)
 		site.node.textContent = ''
 		site.insertedNodes = reconciledNodes.length ? reconciledNodes : undefined
@@ -908,10 +917,11 @@ function canHydrateNode(liveNode, targetNode) {
 	const targetElement = /** @type {Element} */ (targetNode)
 
 	if (
-		liveElement.namespaceURI !== targetElement.namespaceURI
-		|| liveElement.tagName !== targetElement.tagName
-		|| liveElement.attributes.length !== targetElement.attributes.length
-	) return false
+		liveElement.namespaceURI !== targetElement.namespaceURI ||
+		liveElement.tagName !== targetElement.tagName ||
+		liveElement.attributes.length !== targetElement.attributes.length
+	)
+		return false
 
 	for (const attr of targetElement.attributes) if (liveElement.getAttribute(attr.name) !== attr.value) return false
 
@@ -944,7 +954,8 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 		}
 
 		if (liveNode && !targetNode) {
-			/** @type {ChildNode} */ (liveNode).remove()
+			const removableNode = /** @type {ChildNode} */ (liveNode)
+			removableNode.remove()
 			liveIndex++
 			continue
 		}
@@ -957,7 +968,8 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 			targetNode.nodeType !== Node.TEXT_NODE &&
 			!(parentNode instanceof Element && parentNode.tagName === 'PRE')
 		) {
-			/** @type {ChildNode} */ (liveNode).remove()
+			const removableNode = /** @type {ChildNode} */ (liveNode)
+			removableNode.remove()
 			liveIndex++
 			continue
 		}
@@ -1030,13 +1042,11 @@ class TemplateInstance {
 		for (const site of this.sites) {
 			const previousNode = site.node
 			const node = /** @type {Element | Text} */ (adoptionMap.get(site.node) || site.node)
-
 			site.node = node
 			if (site.insertedNodes)
 				site.insertedNodes = site.insertedNodes.map(
 					node => /** @type {Element | Text} */ (adoptionMap.get(node) || node),
 				)
-
 			const elementState = site.elementState
 			if (!elementState || node === previousNode || reboundElementStates.has(elementState)) continue
 

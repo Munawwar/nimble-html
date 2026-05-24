@@ -13,10 +13,7 @@ setTimeout(() => {
 	html`
 		<div class="demo">
 			<h1>Pseudo-hydration preserves live input state</h1>
-			<p>
-				The server markup starts with <code>value="hello"</code>. We simulate a user typing
-				before hydration runs.
-			</p>
+			<p>The server markup starts with <code>value="hello"</code>. We simulate a user typing before hydration runs.</p>
 			<div class="nested">
 				<div class="field">
 					<label for="greeting">Greeting</label>
