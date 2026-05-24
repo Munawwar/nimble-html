@@ -132,6 +132,8 @@ template holes directly, without relying on declaration tricks:
 - `nimble-html-typescript-plugin` adds IDE diagnostics and completions for
   `html`, `svg`, and `mathml` tagged templates.
 - `nimble-html-lint` runs the same checks from the command line.
+- `nimble-html-vscode` bundles tagged-template highlighting plus the TypeScript
+  plugin for VS Code.
 
 They currently live as in-repo packages under `tooling/` rather than being
 published as part of the main `nimble-html` package.
@@ -159,6 +161,13 @@ The plugin reports mismatched values in:
 
 It also offers attribute/property/event completions while typing inside the
 template text.
+
+## VS Code extension
+
+The `tooling/nimble-html-vscode` package is the VS Code wrapper for this
+tooling. It contributes tagged-template highlighting for `html`, `svg`, and
+`mathml`, and tells VS Code to load `nimble-html-typescript-plugin` as a
+TypeScript server plugin.
 
 ## CLI
 

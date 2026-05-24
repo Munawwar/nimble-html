@@ -1,164 +1,116 @@
 {
-    "name": "lit-html",
-    "private": true,
-    "displayName": "lit-html",
-    "description": "Syntax highlighting and IntelliSense for html inside of JavaScript and TypeScript tagged template strings",
-    "version": "1.11.1",
-    "publisher": "bierner",
-    "icon": "docs/logo.png",
-    "license": "MIT",
-    "galleryBanner": {
-        "color": "#fcfcfc",
-        "theme": "light"
-    },
-    "repository": {
-        "url": "https://github.com/mjbvz/vscode-lit-html.git"
-    },
-    "bugs": {
-        "url": "https://github.com/mjbvz/vscode-lit-html/issues"
-    },
-    "categories": [
-        "Programming Languages"
-    ],
-    "keywords": [
-        "lit-html",
-        "javascript",
-        "typescript",
-        "html",
-        "template"
-    ],
-    "engines": {
-        "vscode": "^1.29.0"
-    },
-    "activationEvents": [
-        "onLanguage:javascript",
-        "onLanguage:javascriptreact",
-        "onLanguage:typescript",
-        "onLanguage:typescriptreact"
-    ],
-    "main": "./out/index.js",
-    "contributes": {
-        "configuration": [
-            {
-                "id": "lit-html",
-                "title": "Lit HTML",
-                "properties": {
-                    "lit-html.tags": {
-                        "type": "array",
-                        "description": "List of template tags to enable html intellisense in.",
-                        "items": {
-                            "type": "string",
-                            "description": "Tag name."
-                        },
-                        "default": [
-                            "html",
-                            "raw"
-                        ]
-                    },
-                    "lit-html.format.enabled": {
-                        "type": "boolean",
-                        "description": "Enable/disable formatting of html template strings.",
-                        "default": true
-                    }
-                }
-            }
-        ],
-        "grammars": [
-            {
-                "injectTo": [
-                    "source.js",
-                    "source.js.jsx",
-                    "source.jsx",
-                    "source.ts",
-                    "source.tsx",
-                    "text.html.basic"
-                ],
-                "scopeName": "inline.lit-html",
-                "path": "./syntaxes/lit-html.json",
-                "embeddedLanguages": {
-                    "meta.embedded.block.html": "html",
-                    "meta.embedded.block.css": "css",
-                    "source.css": "css"
-                }
-            },
-            {
-                "injectTo": [
-                    "source.js",
-                    "source.js.jsx",
-                    "source.jsx",
-                    "source.ts",
-                    "source.tsx",
-                    "text.html.basic"
-                ],
-                "scopeName": "inline.lit-html.string.injection",
-                "path": "./syntaxes/lit-html-string-injection.json",
-                "embeddedLanguages": {
-                    "meta.template.expression.ts": "typescript"
-                }
-            },
-            {
-                "injectTo": [
-                    "source.js",
-                    "source.js.jsx",
-                    "source.jsx",
-                    "source.ts",
-                    "source.tsx",
-                    "text.html.basic"
-                ],
-                "scopeName": "inline.lit-html.style.injection",
-                "path": "./syntaxes/lit-html-style-injection.json",
-                "embeddedLanguages": {
-                    "meta.template.expression.ts": "typescript"
-                }
-            },
-            {
-                "injectTo": [
-                    "source.js",
-                    "source.js.jsx",
-                    "source.jsx",
-                    "source.ts",
-                    "source.tsx",
-                    "text.html.basic"
-                ],
-                "scopeName": "inline.lit-html-svg",
-                "path": "./syntaxes/lit-html-svg.json",
-                "embeddedLanguages": {
-                    "meta.embedded.block.svg": "xml"
-                }
-            }
-        ],
-        "typescriptServerPlugins": [
-            {
-                "name": "typescript-lit-html-plugin",
-                "enableForWorkspaceTypeScriptVersions": true
-            }
-        ],
-        "jsonValidation": [
-            {
-                "fileMatch": "jsconfig*.json",
-                "url": "./schemas/tsconfig.schema.json"
-            },
-            {
-                "fileMatch": "tsconfig*.json",
-                "url": "./schemas/tsconfig.schema.json"
-            }
-        ]
-    },
-    "scripts": {
-        "vscode:prepublish": "tsc -p ./",
-        "compile": "tsc -p ./",
-        "watch": "tsc -w -p ./",
-        "test": "node ./out/test"
-    },
-    "dependencies": {
-        "typescript-lit-html-plugin": "0.9.0"
-    },
-    "devDependencies": {
-        "@types/node": "^12.7.5",
-        "@types/vscode": "^1.29.0",
-        "glob": "^7.1.4",
-        "mocha": "^6.2.0",
-        "typescript": "^3.6.3",
-        "vscode-test": "^1.2.0"
-    }
+	"name": "nimble-html-vscode",
+	"private": true,
+	"displayName": "nimble-html",
+	"description": "Syntax highlighting plus TypeScript diagnostics for nimble-html tagged templates",
+	"version": "0.1.0",
+	"publisher": "nimble-html",
+	"license": "MIT",
+	"repository": {
+		"url": "https://github.com/lume/nimble-html.git"
+	},
+	"keywords": [
+		"nimble-html",
+		"html",
+		"svg",
+		"mathml",
+		"typescript",
+		"vscode"
+	],
+	"engines": {
+		"vscode": "^1.89.0"
+	},
+	"categories": [
+		"Programming Languages"
+	],
+	"contributes": {
+		"grammars": [
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html",
+				"path": "./syntaxes/nimble-html.json",
+				"embeddedLanguages": {
+					"meta.embedded.block.html": "html",
+					"meta.embedded.block.css": "css",
+					"source.css": "css"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html.string.injection",
+				"path": "./syntaxes/nimble-html-string-injection.json",
+				"embeddedLanguages": {
+					"meta.template.expression.ts": "typescript"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html.style.injection",
+				"path": "./syntaxes/nimble-html-style-injection.json",
+				"embeddedLanguages": {
+					"meta.template.expression.ts": "typescript"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html-svg",
+				"path": "./syntaxes/nimble-html-svg.json",
+				"embeddedLanguages": {
+					"meta.embedded.block.svg": "xml"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html-mathml",
+				"path": "./syntaxes/nimble-html-mathml.json",
+				"embeddedLanguages": {
+					"meta.embedded.block.mathml": "xml"
+				}
+			}
+		],
+		"typescriptServerPlugins": [
+			{
+				"name": "nimble-html-typescript-plugin",
+				"enableForWorkspaceTypeScriptVersions": true
+			}
+		]
+	},
+	"dependencies": {
+		"nimble-html-typescript-plugin": "0.1.0"
+	}
 }
