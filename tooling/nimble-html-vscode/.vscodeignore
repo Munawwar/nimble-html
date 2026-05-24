@@ -1,9 +1,5 @@
-.vscode/
-.vscode-test/
-test/
-out/test/**
-
-**/*.map
-**/*.ts
-**/tsconfig.json
-**/tslint.json
+**/.git/**
+**/.DS_Store
+**/*.vsix
+**/node_modules/.cache/**
+scripts/**

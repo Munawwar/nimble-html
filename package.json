@@ -15,6 +15,10 @@
 		"build:watch": "tsc --watch",
 		"clean": "rimraf .types-generated",
 		"lint:templates": "node tooling/nimble-html-lint/bin.js",
+		"vscode:prepare": "node tooling/nimble-html-vscode/scripts/local-dev.js prepare",
+		"vscode:package": "node tooling/nimble-html-vscode/scripts/local-dev.js package",
+		"vscode:install": "node tooling/nimble-html-vscode/scripts/local-dev.js install",
+		"vscode:dev": "node tooling/nimble-html-vscode/scripts/local-dev.js dev",
 		"typecheck": "tsc --noEmit",
 		"typecheck:api": "tsc -p tsconfig.type-tests.json --noEmit",
 		"typecheck:watch": "tsc --noEmit --watch",
@@ -38,6 +42,7 @@
 	},
 	"devDependencies": {
 		"@types/mocha": "^10.0.10",
+		"@vscode/vsce": "^3.6.1",
 		"@web/dev-server-import-maps": "^0.2.1",
 		"@web/test-runner": "^0.20.2",
 		"five-server": "^0.4.4",
