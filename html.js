@@ -119,9 +119,9 @@ function handleTemplateTag(mode, strings, ...values) {
 					key,
 					/** @type {Element | ShadowRoot | DocumentFragment} */ (liveNodes[0]?.parentNode),
 					liveNodes,
-			  )
+				)
 			: template.updateInstance(key)
-	};
+	}
 	renderFn.template = template
 	return renderFn
 }
@@ -720,7 +720,8 @@ function clearSpreadBinding(site, name) {
 			}
 		}
 	} else if (name.startsWith('.')) {
-		/** @type {any} */ (element)[name.slice(1)] = undefined
+		const anyElement = /** @type {any} */ (element)
+		anyElement[name.slice(1)] = undefined
 	} else {
 		element.removeAttribute(name.startsWith('?') ? name.slice(1) : name)
 	}
@@ -735,8 +736,7 @@ function shallowObjectEquals(a, b) {
 	if (!a || !b) return !a && !b
 	const keys = Object.keys(a)
 	if (keys.length !== Object.keys(b).length) return false
-	for (const key of keys)
-		if (!(key in b) || a[key] !== b[key]) return false
+	for (const key of keys) if (!(key in b) || a[key] !== b[key]) return false
 	return true
 }
 
@@ -753,12 +753,18 @@ function applyPreparedSpreadSite(site, hydrateOnly = false, forceApply = false) 
 
 	site.preparedValue = undefined
 
-	if (!forceApply && !site.skipEqualityCheck && shallowObjectEquals(/** @type {Record<string, unknown> | null} */ (site.lastValue), spreadValue)) return []
+	if (
+		!forceApply &&
+		!site.skipEqualityCheck &&
+		shallowObjectEquals(/** @type {Record<string, unknown> | null} */ (site.lastValue), spreadValue)
+	)
+		return []
 
 	for (const [name, inputValue] of Object.entries(spreadValue || {})) {
-			if (name.startsWith('@')) {
-				const eventName = name.slice(1)
-				const spreadEventState = /** @type {{ internalHandler?: EventListener, currentEventListener?: EventListener }} */ (
+		if (name.startsWith('@')) {
+			const eventName = name.slice(1)
+			const spreadEventState =
+				/** @type {{ internalHandler?: EventListener, currentEventListener?: EventListener }} */ (
 					spreadHandlers?.get(eventName) || {}
 				)
 			if (updateEventHandler(element, eventName, /** @type {any} */ (spreadEventState), inputValue)) {
@@ -772,8 +778,10 @@ function applyPreparedSpreadSite(site, hydrateOnly = false, forceApply = false) 
 		}
 
 		if (hydrateOnly) {
-			if (name.startsWith('.') && element.localName.includes('-'))
-				/** @type {any} */ (element)[name.slice(1)] = inputValue
+			if (name.startsWith('.') && element.localName.includes('-')) {
+				const anyElement = /** @type {any} */ (element)
+				anyElement[name.slice(1)] = inputValue
+			}
 			continue
 		}
 
@@ -781,7 +789,8 @@ function applyPreparedSpreadSite(site, hydrateOnly = false, forceApply = false) 
 			if (inputValue) element.setAttribute(name.slice(1), '')
 			else element.removeAttribute(name.slice(1))
 		} else if (name.startsWith('.')) {
-			/** @type {any} */ (element)[name.slice(1)] = inputValue
+			const anyElement = /** @type {any} */ (element)
+			anyElement[name.slice(1)] = inputValue
 		} else {
 			if (inputValue instanceof Node || Array.isArray(inputValue) || typeof inputValue === 'function')
 				throw new Error(
@@ -789,7 +798,6 @@ function applyPreparedSpreadSite(site, hydrateOnly = false, forceApply = false) 
 				)
 			element.setAttribute(name, String(inputValue ?? ''))
 		}
-
 	}
 
 	site.lastValue = spreadValue
@@ -824,18 +832,18 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(node, endBoundaryNode)
 				else parentNode.insertBefore(node, endBoundaryNode)
 			}
-		// fast path to remove head or tail
+			// fast path to remove head or tail
 		} else if (newEnd === newStart) {
 			while (oldStart < oldEnd) /** @type {ChildNode} */ (oldNodes[oldStart++]).remove()
-		// fast path for same head
+			// fast path for same head
 		} else if (oldNodes[oldStart] === newNodes[newStart]) {
 			oldStart++
 			newStart++
-		// fast path for same tail
+			// fast path for same tail
 		} else if (oldNodes[oldEnd - 1] === newNodes[newEnd - 1]) {
 			oldEnd--
 			newEnd--
-		// fast path for swaps
+			// fast path for swaps
 		} else if (
 			oldStart < oldEnd - 1 &&
 			newStart < newEnd - 1 &&
@@ -860,7 +868,10 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 			const oldEndNode = oldNodes[--oldEnd]
 			const startInsertBefore = oldStartNode.nextSibling
 			if ('moveBefore' in parentNode && oldStartNode.parentNode === parentNode)
-				/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldStartNode, oldEndNode.nextSibling)
+				/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(
+					oldStartNode,
+					oldEndNode.nextSibling,
+				)
 			else parentNode.insertBefore(oldStartNode, oldEndNode.nextSibling)
 			// If the two nodes were adjacent siblings then they are already swapped
 			// now, so ignore that case.
@@ -869,7 +880,7 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldEndNode, startInsertBefore)
 				else parentNode.insertBefore(oldEndNode, startInsertBefore)
 			}
-		// slow path for the unmatched middle
+			// slow path for the unmatched middle
 		} else {
 			// To keep it simple, just (re-)insert the unmatched middle before endBoundary.
 			const lastSettledNode = newNodes[newStart - 1] || null
@@ -892,7 +903,8 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 					: parentNode.firstChild
 			while (node && node !== firstPendingNode) {
 				const nextSibling = node.nextSibling
-				;(/** @type {ChildNode} */ (node)).remove()
+				const removableNode = /** @type {ChildNode} */ (node)
+				removableNode.remove()
 				node = nextSibling
 			}
 		}
@@ -954,7 +966,12 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 		}
 
 		const reconciledNodes = /** @type {(Element | Text)[]} */ (
-			reconcileDom(/** @type {Element | DocumentFragment | Document} */ (parentNode), site.insertedNodes || [], nodes, site.node)
+			reconcileDom(
+				/** @type {Element | DocumentFragment | Document} */ (parentNode),
+				site.insertedNodes || [],
+				nodes,
+				site.node,
+			)
 		)
 		site.node.textContent = ''
 		site.insertedNodes = reconciledNodes.length ? reconciledNodes : undefined
@@ -996,13 +1013,13 @@ function canHydrateNode(liveNode, targetNode) {
 	const targetElement = /** @type {Element} */ (targetNode)
 
 	if (
-		liveElement.namespaceURI !== targetElement.namespaceURI
-		|| liveElement.tagName !== targetElement.tagName
-		|| liveElement.attributes.length !== targetElement.attributes.length
-	) return false
+		liveElement.namespaceURI !== targetElement.namespaceURI ||
+		liveElement.tagName !== targetElement.tagName ||
+		liveElement.attributes.length !== targetElement.attributes.length
+	)
+		return false
 
-	for (const attr of targetElement.attributes)
-		if (liveElement.getAttribute(attr.name) !== attr.value) return false
+	for (const attr of targetElement.attributes) if (liveElement.getAttribute(attr.name) !== attr.value) return false
 
 	return true
 }
@@ -1033,7 +1050,8 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 		}
 
 		if (liveNode && !targetNode) {
-			/** @type {ChildNode} */ (liveNode).remove()
+			const removableNode = /** @type {ChildNode} */ (liveNode)
+			removableNode.remove()
 			liveIndex++
 			continue
 		}
@@ -1046,7 +1064,8 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 			targetNode.nodeType !== Node.TEXT_NODE &&
 			!(parentNode instanceof Element && parentNode.tagName === 'PRE')
 		) {
-			/** @type {ChildNode} */ (liveNode).remove()
+			const removableNode = /** @type {ChildNode} */ (liveNode)
+			removableNode.remove()
 			liveIndex++
 			continue
 		}
@@ -1074,16 +1093,16 @@ function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap
 
 		if (liveNode.nodeType === Node.TEXT_NODE || liveNode.nodeType === Node.CDATA_SECTION_NODE) {
 			if (liveNode.nodeValue !== targetNode.nodeValue) liveNode.nodeValue = targetNode.nodeValue
-			} else if (liveNode.nodeType === Node.ELEMENT_NODE) {
-				const liveElement = /** @type {Element} */ (liveNode)
-				reconcileHydrationNodes(
-					liveElement,
-					Array.from(liveElement.childNodes),
-					Array.from(targetNode.childNodes),
-					adoptionMap,
-					null,
-				)
-			}
+		} else if (liveNode.nodeType === Node.ELEMENT_NODE) {
+			const liveElement = /** @type {Element} */ (liveNode)
+			reconcileHydrationNodes(
+				liveElement,
+				Array.from(liveElement.childNodes),
+				Array.from(targetNode.childNodes),
+				adoptionMap,
+				null,
+			)
+		}
 
 		liveIndex++
 		targetIndex++
@@ -1112,22 +1131,24 @@ class TemplateInstance {
 	 * @param {Map<Node, Node>} adoptionMap
 	 */
 	absorb(adoptionMap) {
-		this.nodes = /** @type {TemplateNodes} */ (Object.freeze(
-			this.nodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node))
-		))
+		this.nodes = /** @type {TemplateNodes} */ (
+			Object.freeze(this.nodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node)))
+		)
 		for (const site of this.sites) {
 			const previousNode = site.node
 			const node = /** @type {Element | Text} */ (adoptionMap.get(site.node) || site.node)
-			
+
 			// If an event site moved to a different adopted node, detach the old wrapper
 			// before we retarget the site bookkeeping.
 			if (site.type === 'event' && site.internalHandler && node !== previousNode)
 				previousNode.removeEventListener(site.attributeName || '', site.internalHandler)
-			
+
 			site.node = node
 			if (site.insertedNodes)
-				site.insertedNodes = site.insertedNodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node))
-			
+				site.insertedNodes = site.insertedNodes.map(
+					node => /** @type {Element | Text} */ (adoptionMap.get(node) || node),
+				)
+
 			// attach event listeners and for custom elements initialize props
 			if (site.type === 'event') {
 				if (node !== previousNode) site.internalHandler = undefined
@@ -1215,7 +1236,12 @@ class TemplateInstance {
 						return value
 					})
 
-				if (!pendingKeys?.has(staleKey) && !site.skipEqualityCheck && arrayEquals(/** @type {unknown[]} */ (site.lastValue), attributeValues)) continue // No change
+				if (
+					!pendingKeys?.has(staleKey) &&
+					!site.skipEqualityCheck &&
+					arrayEquals(/** @type {unknown[]} */ (site.lastValue), attributeValues)
+				)
+					continue // No change
 
 				// Check if any attribute value would produce DOM nodes - not allowed in attributes
 				if (

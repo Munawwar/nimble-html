@@ -1,4 +1,12 @@
-import type {AttributeValue, ChildValue, EventValue, PropertyValue, TemplateNodes, TemplateView} from '../html.js'
+import type {
+	AttributeValue,
+	ChildValue,
+	EventValue,
+	InterpolationSite,
+	PropertyValue,
+	TemplateNodes,
+	TemplateView,
+} from '../html.js'
 import {force, html} from '../html.js'
 
 const key = Symbol()
@@ -28,6 +36,9 @@ inputValue
 clickHandler
 stringHandler
 removedHandler
+
+const spreadSiteType: InterpolationSite['type'] = 'spread'
+spreadSiteType
 
 // @ts-expect-error attribute values should be stringable primitives
 const badAttributeValue: AttributeValue = () => 'nope'

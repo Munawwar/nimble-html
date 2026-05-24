@@ -16,13 +16,7 @@ export type TemplateView = ((key?: any, liveNodes?: Node[]) => TemplateNodes) & 
 export type PrimitiveChild = string | number | boolean | bigint | null | undefined
 export type AttributeValue = string | number | boolean | bigint | null | undefined
 export type ChildValue = PrimitiveChild | Node | TemplateView | readonly ChildValue[]
-export type EventValue<E extends Event = Event> =
-	| ((event: E) => unknown)
-	| string
-	| null
-	| undefined
-	| false
-	| ''
+export type EventValue<E extends Event = Event> = ((event: E) => unknown) | string | null | undefined | false | ''
 
 type ElementForTag<Tag extends string> = Tag extends keyof HTMLElementTagNameMap
 	? HTMLElementTagNameMap[Tag]
@@ -31,7 +25,7 @@ type ElementForTag<Tag extends string> = Tag extends keyof HTMLElementTagNameMap
 		: Element
 
 export type PropertyValue<Tag extends string, Prop extends string> = Prop extends keyof ElementForTag<Tag>
-	? (ElementForTag<Tag>)[Prop]
+	? ElementForTag<Tag>[Prop]
 	: unknown
 
 /**
@@ -57,7 +51,7 @@ export function force<T>(value: T): ForceValue<T>
 export type InterpolationValue = unknown
 export type InterpolationSite = {
 	node: Element | Text
-	type: 'text' | 'attribute' | 'event' | 'boolean-attribute' | 'property'
+	type: 'text' | 'attribute' | 'event' | 'boolean-attribute' | 'property' | 'spread'
 	attributeName?: string
 	parts?: Array<string | number>
 	interpolationIndex?: number
@@ -67,4 +61,6 @@ export type InterpolationSite = {
 	currentEventListener?: EventListener
 	skipEqualityCheck?: boolean
 	requiresUnwrapping?: boolean
+	spreadHandlers?: Map<string, {currentEventListener?: EventListener; internalHandler?: EventListener}>
+	preparedValue?: Record<string, unknown> | null
 }

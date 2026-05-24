@@ -1,0 +1,14 @@
+{
+	"name": "nimble-html-lint",
+	"version": "0.1.0",
+	"private": true,
+	"type": "commonjs",
+	"main": "index.js",
+	"bin": {
+		"nimble-html-lint": "bin.js"
+	},
+	"dependencies": {
+		"nimble-html-template-analyzer": "0.1.0",
+		"typescript": "^5.9.2"
+	}
+}

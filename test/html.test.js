@@ -124,7 +124,9 @@ describe('html template function', () => {
 		liveInput.value = 'hello world'
 		const key = Symbol()
 
-		const [div] = /** @type {[HTMLDivElement]} */ (html`<div><input value=${'hello'}></div>`(key, Array.from(container.childNodes)))
+		const [div] = /** @type {[HTMLDivElement]} */ (
+			html`<div><input value=${'hello'} /></div>`(key, Array.from(container.childNodes))
+		)
 		const input = /** @type {HTMLInputElement} */ (div.firstChild)
 
 		assertEquals(div, liveDiv, 'Hydration should reuse the existing root element despite surrounding whitespace')
@@ -182,7 +184,11 @@ describe('html template function', () => {
 		assertEquals(anyButton.foo, 'spread foo', 'Spread should override earlier explicit properties')
 		assertEquals(anyButton.bar, 'after', 'Later explicit properties should override spread values')
 		assertEquals(button.getAttribute('title'), 'from spread', 'Spread should set regular attributes')
-		assertEquals(button.hasAttribute('hidden'), false, 'Later explicit boolean attributes should override spread values')
+		assertEquals(
+			button.hasAttribute('hidden'),
+			false,
+			'Later explicit boolean attributes should override spread values',
+		)
 
 		button.click()
 		assertEquals(clicks, 1, 'Spread should attach event listeners')
@@ -218,7 +224,11 @@ describe('html template function', () => {
 		assertEquals(/** @type {any} */ (custom).foo, 'bar', 'Hydration should initialize custom element props from spread')
 		assertEquals(custom.getAttribute('title'), 'live', 'Hydration should preserve native attributes on custom elements')
 		assertEquals(/** @type {any} */ (button).foo, undefined, 'Hydration should skip native props from spread')
-		assertEquals(button.getAttribute('title'), 'live', 'Hydration should preserve native attributes on standard elements')
+		assertEquals(
+			button.getAttribute('title'),
+			'live',
+			'Hydration should preserve native attributes on standard elements',
+		)
 
 		custom.dispatchEvent(new Event('ping'))
 		button.click()
