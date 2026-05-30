@@ -124,6 +124,31 @@ If you have Node.js tooling, you can also install it via `npm`:
 npm install nimble-html
 ```
 
+## SSR
+
+For server-side rendering without a DOM shim, import from the `nimble-html/ssr`
+subpath:
+
+```js
+import {html, renderToString} from 'nimble-html/ssr'
+
+const page = html`
+  <main>
+    <h1>${'Hello SSR'}</h1>
+    <input value=${'initial attribute value'} />
+  </main>
+`
+
+const htmlString = renderToString(page)
+```
+
+The SSR entrypoint mirrors the template syntax, including nested `html`, `svg`,
+and `mathml` templates, arrays, spreads, and `force()`, but it intentionally
+does not serialize `.property` or `@event` bindings because those are not
+representable in HTML and would otherwise create hydration mismatches. For
+initial server HTML state, prefer real attributes such as `value=${...}`,
+`checked=${...}`, or `?disabled=${...}` where appropriate.
+
 # Tooling
 
 This repo now includes TypeScript-powered tooling packages under `tooling/` for checking

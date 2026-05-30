@@ -4,8 +4,19 @@
 	"main": "html.js",
 	"type": "module",
 	"types": "html.d.ts",
+	"exports": {
+		".": {
+			"types": "./html.d.ts",
+			"default": "./html.js"
+		},
+		"./ssr": {
+			"types": "./ssr.d.ts",
+			"default": "./ssr.js"
+		}
+	},
 	"files": [
-		"html.*"
+		"html.*",
+		"ssr.*"
 	],
 	"scripts": {
 		"start": "five-server . --open=examples",
@@ -22,8 +33,9 @@
 		"typecheck": "tsc --noEmit",
 		"typecheck:api": "tsc -p tsconfig.type-tests.json --noEmit",
 		"typecheck:watch": "tsc --noEmit --watch",
-		"test": "prettier . --check && npm run build:clean && npm run typecheck:api && npm run test:tooling && npm run test:all",
+		"test": "prettier . --check && npm run build:clean && npm run typecheck:api && npm run test:tooling && npm run test:ssr && npm run test:all",
 		"test:tooling": "node --test tooling/test/*.test.js",
+		"test:ssr": "node --test test/ssr.test.js",
 		"test:watch": "npm run test:all:watch",
 		"test:all": "web-test-runner --config test/web-test-runner.all.config.mjs",
 		"test:all:watch": "npm run test:all -- --watch",
