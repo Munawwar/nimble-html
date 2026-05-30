@@ -1,0 +1,116 @@
+{
+	"name": "nimble-html-vscode",
+	"private": true,
+	"displayName": "nimble-html",
+	"description": "Syntax highlighting plus TypeScript diagnostics for nimble-html tagged templates",
+	"version": "0.1.0",
+	"publisher": "nimble-html",
+	"license": "MIT",
+	"repository": {
+		"url": "https://github.com/lume/nimble-html.git"
+	},
+	"keywords": [
+		"nimble-html",
+		"html",
+		"svg",
+		"mathml",
+		"typescript",
+		"vscode"
+	],
+	"engines": {
+		"vscode": "^1.89.0"
+	},
+	"categories": [
+		"Programming Languages"
+	],
+	"contributes": {
+		"grammars": [
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html",
+				"path": "./syntaxes/nimble-html.json",
+				"embeddedLanguages": {
+					"meta.embedded.block.html": "html",
+					"meta.embedded.block.css": "css",
+					"source.css": "css"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html.string.injection",
+				"path": "./syntaxes/nimble-html-string-injection.json",
+				"embeddedLanguages": {
+					"meta.template.expression.ts": "typescript"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html.style.injection",
+				"path": "./syntaxes/nimble-html-style-injection.json",
+				"embeddedLanguages": {
+					"meta.template.expression.ts": "typescript"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html-svg",
+				"path": "./syntaxes/nimble-html-svg.json",
+				"embeddedLanguages": {
+					"meta.embedded.block.svg": "xml"
+				}
+			},
+			{
+				"injectTo": [
+					"source.js",
+					"source.js.jsx",
+					"source.jsx",
+					"source.ts",
+					"source.tsx",
+					"text.html.basic"
+				],
+				"scopeName": "inline.nimble-html-mathml",
+				"path": "./syntaxes/nimble-html-mathml.json",
+				"embeddedLanguages": {
+					"meta.embedded.block.mathml": "xml"
+				}
+			}
+		],
+		"typescriptServerPlugins": [
+			{
+				"name": "nimble-html-typescript-plugin",
+				"enableForWorkspaceTypeScriptVersions": true
+			}
+		]
+	},
+	"dependencies": {
+		"nimble-html-typescript-plugin": "0.1.0"
+	}
+}

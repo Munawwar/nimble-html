@@ -1,5 +1,8 @@
 node_modules/
 .DS_Store
+.artifacts/
 
 *.d.ts
 *.d.ts.map
+.types-generated/
+!html.d.ts

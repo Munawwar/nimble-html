@@ -78,6 +78,7 @@ console.log(div.textContent) // "Message: Hello Webdev"
 
 - [Basic](https://raw.githack.com/lume/nimble-html/main/examples/basic.html) - [source](./examples/basic.html)
 - [Custom Elements](https://raw.githack.com/lume/nimble-html/main/examples/custom-elements/index.html) - [source](./examples/custom-elements/index.html)
+- [Hydration](https://raw.githack.com/lume/nimble-html/main/examples/hydration.html) - [source](./examples/hydration.html)
 - [Forkable CodePen Example](https://codepen.io/trusktr/pen/emZBgYO)
 
 # Installation
@@ -121,6 +122,66 @@ If you have Node.js tooling, you can also install it via `npm`:
 
 ```bash
 npm install nimble-html
+```
+
+# Tooling
+
+This repo now includes TypeScript-powered tooling packages under `tooling/` for checking
+template holes directly, without relying on declaration tricks:
+
+- `nimble-html-typescript-plugin` adds IDE diagnostics and completions for
+  `html`, `svg`, and `mathml` tagged templates.
+- `nimble-html-lint` runs the same checks from the command line.
+- `nimble-html-vscode` bundles tagged-template highlighting plus the TypeScript
+  plugin for VS Code.
+
+They currently live as in-repo packages under `tooling/` rather than being
+published as part of the main `nimble-html` package.
+
+## TypeScript plugin
+
+After installing or linking the plugin package, add it to a `tsconfig.json`
+project:
+
+```json
+{
+  "compilerOptions": {
+    "plugins": [{"name": "nimble-html-typescript-plugin"}]
+  }
+}
+```
+
+The plugin reports mismatched values in:
+
+- regular attribute holes like `value=${...}`
+- boolean attribute holes like `?checked=${...}`
+- property holes like `.value=${...}`
+- event holes like `@click=${...}`
+- spread holes like `...${{'.value': value, '@click': handler}}`
+
+It also offers attribute/property/event completions while typing inside the
+template text.
+
+## VS Code extension
+
+The `tooling/nimble-html-vscode` package is the VS Code wrapper for this
+tooling. It contributes tagged-template highlighting for `html`, `svg`, and
+`mathml`, and tells VS Code to load `nimble-html-typescript-plugin` as a
+TypeScript server plugin.
+
+## CLI
+
+After installing or linking the CLI package, run the linter against a
+TypeScript project:
+
+```bash
+nimble-html-lint --project tsconfig.json
+```
+
+Inside this repo you can run the packaged entrypoint with:
+
+```bash
+npm run lint:templates -- --project tooling/test-fixtures/fixture-project/tsconfig.json
 ```
 
 # Key Concepts (pun intended)

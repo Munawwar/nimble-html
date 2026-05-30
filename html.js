@@ -3,8 +3,9 @@
  *
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns DOM nodes rendered with the given
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns DOM nodes rendered with the given
  * values.
  */
 export function html(strings, ...values) {
@@ -16,8 +17,9 @@ export function html(strings, ...values) {
  *
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns SVG DOM nodes rendered with the given
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns SVG DOM nodes rendered with the given
  * values.
  */
 export function svg(strings, ...values) {
@@ -29,9 +31,10 @@ export function svg(strings, ...values) {
  *
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns MathML DOM nodes rendered with the given
- * values.
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns MathML DOM nodes rendered with the
+ * given values.
  */
 export function mathml(strings, ...values) {
 	return handleTemplateTag('mathml', strings, ...values)
@@ -101,24 +104,26 @@ function handleForceValue(site, value) {
  * @param {TemplateMode} mode
  * @param {TemplateStringsArray} strings
  * @param {...InterpolationValue} values
- * @returns {(key: any) => TemplateNodes} A function that accepts a key for
- * template instance identity, and returns DOM nodes rendered with the given
+ * @returns {(key?: any, liveNodes?: Node[]) => TemplateNodes} A function that
+ * accepts a key for template instance identity, and optionally a live node
+ * slice to hydrate in place, and returns DOM nodes rendered with the given
  * values.
  */
 function handleTemplateTag(mode, strings, ...values) {
 	const template = parseTemplate(strings, mode)
-
-	const useFunctionWrapper = true
-
-	if (useFunctionWrapper)
-		return function (key = Symbol()) {
-			template.values = values
-			return template.updateInstance(key)
-		}
-	else {
+	/** @type {((key?: any, liveNodes?: Node[]) => TemplateNodes) & {template: Template}} */
+	const renderFn = function (key = Symbol(), liveNodes) {
 		template.values = values
-		return template.updateInstance
+		return liveNodes
+			? template.hydrateInstance(
+					key,
+					/** @type {Element | ShadowRoot | DocumentFragment} */ (liveNodes[0]?.parentNode),
+					liveNodes,
+				)
+			: template.updateInstance(key)
 	}
+	renderFn.template = template
+	return renderFn
 }
 
 /**
@@ -132,6 +137,9 @@ const INTERPOLATION_MARKER = '⧙⧘'
 
 /** RegExp for matching interpolation markers */
 const INTERPOLATION_REGEXP = new RegExp(`${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
+const SPREAD_INTERPOLATION_REGEXP = new RegExp(`^\\.\\.\\.${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
+const SPREAD_PLACEHOLDER_ATTR_PREFIX = `x-${INTERPOLATION_MARKER}spread-`
+const SPREAD_PLACEHOLDER_ATTR_REGEXP = new RegExp(`^${SPREAD_PLACEHOLDER_ATTR_PREFIX}(\\d+)${INTERPOLATION_MARKER}$`)
 
 /** Regex for finding HTML opening/self-closing tags */
 const HTML_TAG_REGEXP = /<[^<>]*?\/?>/g
@@ -240,9 +248,10 @@ class Template {
 		//    case-insensitive, while still preserving the original case for JS
 		//    property names so we can set them correctly on the elements.
 
-		// Scan for HTML tags and process .property attributes within each tag
+		// Scan for HTML tags and process spread/.property attributes within each tag
 		htmlString = htmlString.replace(HTML_TAG_REGEXP, tagMatch => {
-			// Parse the tag content more carefully to avoid matching dots inside quoted attribute values
+			// Parse the tag content more carefully to avoid matching spread/property
+			// syntax inside quoted attribute values.
 			const parts = []
 			let lastIndex = 0
 			let inQuotes = false
@@ -259,6 +268,15 @@ class Template {
 					inQuotes = false
 					quoteChar = ''
 				} else if (!inQuotes && i > 0 && /\s/.test(tagMatch[i - 1])) {
+					const spreadMatch = tagMatch.slice(i).match(SPREAD_INTERPOLATION_REGEXP)
+					if (spreadMatch) {
+						parts.push(tagMatch.slice(lastIndex, i))
+						parts.push(`${SPREAD_PLACEHOLDER_ATTR_PREFIX}${spreadMatch[1]}${INTERPOLATION_MARKER}=""`)
+						lastIndex = i + spreadMatch[0].length
+						i = lastIndex - 1
+						continue
+					}
+
 					// Detect attribute patterns when preceded by whitespace and not in quotes
 					let prefix = null
 
@@ -427,11 +445,37 @@ class Template {
 	 * Update instance with new values. This gets returned by the `html`
 	 * function for users to call with their keys.
 	 *
-	 * @param {TemplateKey=} key
+	 * @param {TemplateKey} key
 	 */
 	updateInstance = (key = Symbol()) => {
 		const templateInstance = this.getInstance(key)
 		templateInstance.applyValues(this.values)
+		return templateInstance.nodes
+	}
+
+	/**
+	 * Hydrate an existing DOM subtree into a template instance, reusing matching
+	 * nodes and replacing mismatches with the template-owned nodes.
+	 *
+	 * @param {TemplateKey} key
+	 * @param {Element | ShadowRoot | DocumentFragment} container
+	 * @param {Node[]} liveNodes
+	 */
+	hydrateInstance = (key, container, liveNodes) => {
+		const templateInstance = this.getInstance(key)
+		templateInstance.applyValues(this.values)
+
+		/** @type {Map<Node, Node>} */
+		const adoptionMap = new Map()
+		reconcileHydrationNodes(
+			container,
+			liveNodes,
+			/** @type {Node[]} */ ([...templateInstance.nodes]),
+			adoptionMap,
+			liveNodes[liveNodes.length - 1]?.nextSibling || null,
+		)
+
+		templateInstance.absorb(adoptionMap)
 		return templateInstance.nodes
 	}
 }
@@ -482,6 +526,7 @@ function findInterpolationSites(fragment, caseMappings) {
 			}
 		} else if (node.nodeType === Node.ELEMENT_NODE) {
 			const element = /** @type {Element} */ (node)
+			const elementState = {}
 
 			// A list of placeholder attributes to remove after finding
 			// interpolation sites (f.e. !foo="" is removed, as it will be set
@@ -491,8 +536,20 @@ function findInterpolationSites(fragment, caseMappings) {
 			for (const attr of element.attributes) {
 				const name = attr.name
 				const value = attr.value
+				const spreadMatch = name.match(SPREAD_PLACEHOLDER_ATTR_REGEXP)
 
-				// Handle both interpolated and static special attributes, plus regular attributes marked with !
+				if (spreadMatch) {
+					sites.push({
+						node: element,
+						type: /** @type {'spread'} */ ('spread'),
+						interpolationIndex: parseInt(spreadMatch[1]),
+						elementState,
+					})
+					attributesToRemove.push(name)
+					continue
+				}
+
+				// Handle interpolated attrs, static special attrs, and regular attrs marked with !.
 				if (
 					value.includes(INTERPOLATION_MARKER) ||
 					name.startsWith('?') ||
@@ -532,12 +589,21 @@ function findInterpolationSites(fragment, caseMappings) {
 					}
 
 					/** @type {InterpolationSite} */
-					const site = {node: element, type, attributeName: processedName, parts: parsedParts, skipEqualityCheck}
+					const site = {
+						node: element,
+						type,
+						attributeName: processedName,
+						parts: parsedParts,
+						skipEqualityCheck,
+						elementState,
+					}
 
 					sites.push(site)
 
 					// Remove the template attribute, it will be set dynamically later
 					attributesToRemove.push(name)
+				} else {
+					sites.push({node: element, type: 'attribute', attributeName: name, parts: [value], elementState})
 				}
 			}
 
@@ -582,6 +648,175 @@ function getStableNestedKey(site, index) {
 	return key
 }
 
+/**
+ * @param {'attribute'|'boolean-attribute'|'property'|'event'} type
+ * @param {string} name
+ */
+function getBindingKey(type, name) {
+	if (type === 'boolean-attribute') return `?${name}`
+	if (type === 'property') return `.${name}`
+	if (type === 'event') return `@${name}`
+	return name
+}
+
+/**
+ * @param {Element} element
+ * @param {string} eventName
+ * @param {{ internalHandler?: EventListener, currentEventListener?: EventListener }} state
+ * @param {unknown} inputValue
+ */
+function updateEventHandler(element, eventName, state, inputValue) {
+	let eventListener
+	if (typeof inputValue === 'function') eventListener = /** @type {EventListener} */ (inputValue)
+	else if (typeof inputValue === 'string') eventListener = /** @type {EventListener} */ (new Function('event', inputValue))
+	else if (inputValue == null || inputValue === '' || inputValue === false) eventListener = null
+	else throw new TypeError(`Event handler for ${eventName} must be a function or string`)
+
+	if (eventListener) {
+		if (!state.internalHandler) {
+			state.internalHandler = /** @type {EventListener} */ (event => state.currentEventListener?.(event))
+			element.addEventListener(eventName, state.internalHandler)
+		}
+		state.currentEventListener = eventListener
+		return true
+	}
+
+	if (state.internalHandler) {
+		element.removeEventListener(eventName, state.internalHandler)
+		state.internalHandler = undefined
+		state.currentEventListener = undefined
+	}
+
+	return false
+}
+
+const ATTRIBUTE_SITE_ERROR =
+	'Nested templates and DOM elements are not allowed in attributes. Use text content interpolation instead.'
+
+/**
+ * @param {InterpolationSite} site
+ * @param {InterpolationValue[]} values
+ */
+function resolveSiteValue(site, values) {
+	const parts = site.parts || []
+
+	if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
+		return handleForceValue(site, values[parts[1]])
+
+	const processedValues = [...values]
+	for (const part of parts) if (typeof part === 'number') processedValues[part] = handleForceValue(site, values[part])
+	return joinPartsWithValues(parts, processedValues)
+}
+
+/**
+ * Reconcile one ordered list of DOM nodes to another using strict node
+ * identity. This keeps the cheap fast paths for matching heads/tails and
+ * adjacent head/tail swaps, and otherwise replaces the unmatched middle.
+ *
+ * @param {Element | DocumentFragment | Document} parentNode
+ * @param {Node[]} oldNodes
+ * @param {Node[]} newNodes
+ * @param {Node | null} [endBoundaryNode]
+ * @returns {Node[]}
+ */
+function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
+	let oldStart = 0
+	let oldEnd = oldNodes.length
+	let newStart = 0
+	let newEnd = newNodes.length
+	const startBoundaryNode = oldNodes[0]?.previousSibling || endBoundaryNode?.previousSibling || null
+
+	// Thanks to https://github.com/WebReflection/udomdiff for the fast path inspiration.
+	while (oldStart < oldEnd || newStart < newEnd) {
+		// fast path to append head or tail
+		if (oldEnd === oldStart) {
+			while (newStart < newEnd) {
+				const node = newNodes[newStart++]
+				if ('moveBefore' in parentNode && node.parentNode === parentNode)
+					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(node, endBoundaryNode)
+				else parentNode.insertBefore(node, endBoundaryNode)
+			}
+			// fast path to remove head or tail
+		} else if (newEnd === newStart) {
+			while (oldStart < oldEnd) /** @type {ChildNode} */ (oldNodes[oldStart++]).remove()
+			// fast path for same head
+		} else if (oldNodes[oldStart] === newNodes[newStart]) {
+			oldStart++
+			newStart++
+			// fast path for same tail
+		} else if (oldNodes[oldEnd - 1] === newNodes[newEnd - 1]) {
+			oldEnd--
+			newEnd--
+			// fast path for swaps
+		} else if (
+			oldStart < oldEnd - 1 &&
+			newStart < newEnd - 1 &&
+			oldNodes[oldStart] === newNodes[newEnd - 1] &&
+			oldNodes[oldEnd - 1] === newNodes[newStart]
+		) {
+			// Adjacent head/tail swaps are common enough to be worth a dedicated
+			// fast path. This also handles patterns like:
+			//          ↓     ↓
+			// old: [1, 2, 3, 4, 5]
+			//          ↓     ↓
+			// new: [1, 4, 3, 2, 5]
+			//
+			// or another case:
+			//                ↓  ↓
+			// old: [1, 2, 3, 4, 5]
+			//                ↓     ↓
+			// new: [1, 2, 3, 5, 6, 4]
+			newStart++
+			newEnd--
+			const oldStartNode = oldNodes[oldStart++]
+			const oldEndNode = oldNodes[--oldEnd]
+			const startInsertBefore = oldStartNode.nextSibling
+			if ('moveBefore' in parentNode && oldStartNode.parentNode === parentNode)
+				/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(
+					oldStartNode,
+					oldEndNode.nextSibling,
+				)
+			else parentNode.insertBefore(oldStartNode, oldEndNode.nextSibling)
+			// If the two nodes were adjacent siblings then they are already swapped
+			// now, so ignore that case.
+			if (startInsertBefore !== oldEndNode) {
+				if ('moveBefore' in parentNode && oldEndNode.parentNode === parentNode)
+					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(oldEndNode, startInsertBefore)
+				else parentNode.insertBefore(oldEndNode, startInsertBefore)
+			}
+			// slow path for the unmatched middle
+		} else {
+			// To keep it simple, just (re-)insert the unmatched middle before endBoundary.
+			const lastSettledNode = newNodes[newStart - 1] || null
+			const endBoundary = newNodes[newEnd] || endBoundaryNode
+			const firstPendingNode = newNodes[newStart] || endBoundary
+			while (newStart < newEnd) {
+				const node = newNodes[newStart++]
+				if ('moveBefore' in parentNode && node.parentNode === parentNode)
+					/** @type {(node: Node, child: Node | null) => Node} */ (parentNode.moveBefore)(node, endBoundary)
+				else parentNode.insertBefore(node, endBoundary)
+			}
+			// DOM should look like this now:
+			// [potentially some new nodes][remnant old nodes][new nodes][endBoundary]
+			// The remnant old nodes must be removed. We noted down lastSettledNode and
+			// firstPendingNode, so everything in between can be removed.
+				let node = lastSettledNode
+					? lastSettledNode.nextSibling
+					: startBoundaryNode
+						? startBoundaryNode.nextSibling
+						: parentNode.firstChild
+			while (node && node !== firstPendingNode) {
+				const nextSibling = node.nextSibling
+				const removableNode = /** @type {ChildNode} */ (node)
+				removableNode.remove()
+				node = nextSibling
+			}
+		}
+	}
+
+	return newNodes
+}
+
 function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {InterpolationValue} */ value) {
 	// Handle force detection and unwrapping
 	const unwrappedValue = handleForceValue(site, value)
@@ -592,7 +827,7 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 	// Handle simple text cases first (most common case)
 	if (!(unwrappedValue instanceof Node) && !Array.isArray(unwrappedValue) && typeof unwrappedValue !== 'function') {
 		// Simple text content, just set textContent
-		clearPreviousNodes(site)
+		if (site.insertedNodes) for (const node of site.insertedNodes) /** @type {ChildNode} */ (node).remove()
 		site.node.textContent = String(unwrappedValue ?? '')
 		site.insertedNodes = undefined
 	} else {
@@ -626,38 +861,156 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 				.filter(Boolean)
 		)
 
-		// TODO array reconciliation for better performance on large lists. For now, if any one item changes, we re-insert all nodes.
 		if (!site.skipEqualityCheck && site.insertedNodes && arrayEquals(site.insertedNodes, nodes)) return // No change
-		insertNodesAndUpdateSite(site, nodes)
-	}
-}
+		const parentNode = site.node.parentNode
+		if (!parentNode) {
+			site.node.textContent = ''
+			site.insertedNodes = nodes.length ? [...nodes] : undefined
+			return
+		}
 
-/**
- * Helper function to insert nodes and update site state
- * @param {InterpolationSite} site
- * @param {(Element | Text)[]} nodes
- */
-function insertNodesAndUpdateSite(site, nodes) {
-	clearPreviousNodes(site)
-
-	if (nodes.length > 0) {
-		// Insert all nodes before the text node
-		for (const node of nodes) site.node.parentNode?.insertBefore(node, site.node)
-		site.node.textContent = '' // Hide the text node
-		site.insertedNodes = [...nodes]
-	} else {
-		// No nodes to insert - set empty text content
+		const reconciledNodes = /** @type {(Element | Text)[]} */ (
+			reconcileDom(
+				/** @type {Element | DocumentFragment | Document} */ (parentNode),
+				site.insertedNodes || [],
+				nodes,
+				site.node,
+			)
+		)
 		site.node.textContent = ''
-		site.insertedNodes = undefined
+		site.insertedNodes = reconciledNodes.length ? reconciledNodes : undefined
 	}
 }
 
 /**
- * Helper function to clear previously inserted nodes
- * @param {InterpolationSite} site
+ * Map a node subtree to itself for nodes that remain template-owned after
+ * hydration fallback replacement.
+ *
+ * @param {Map<Node, Node>} adoptionMap
+ * @param {Node} root
  */
-function clearPreviousNodes(site) {
-	if (site.insertedNodes) for (const node of site.insertedNodes) node.remove()
+function adoptSubtree(adoptionMap, root) {
+	const nodes = [root]
+
+	while (nodes.length) {
+		const node = /** @type {Node} */ (nodes.pop())
+		adoptionMap.set(node, node)
+		for (let child = node.lastChild; child; child = child.previousSibling) nodes.push(child)
+	}
+}
+
+/**
+ * Compare whether a live node can be adopted in place for hydration.
+ *
+ * @param {Node} liveNode
+ * @param {Node} targetNode
+ */
+function canHydrateNode(liveNode, targetNode) {
+	if (liveNode.nodeType !== targetNode.nodeType) return false
+	if (liveNode.nodeType === Node.COMMENT_NODE) return liveNode.nodeValue === targetNode.nodeValue
+	// text and cdata would be patched anyway
+	if (liveNode.nodeType === Node.TEXT_NODE || liveNode.nodeType === Node.CDATA_SECTION_NODE) return true
+	if (liveNode.nodeType !== Node.ELEMENT_NODE) return liveNode.isEqualNode(targetNode)
+
+	// For elements, compare tag name, namespace and attributes
+	const liveElement = /** @type {Element} */ (liveNode)
+	const targetElement = /** @type {Element} */ (targetNode)
+
+	if (
+		liveElement.namespaceURI !== targetElement.namespaceURI ||
+		liveElement.tagName !== targetElement.tagName ||
+		liveElement.attributes.length !== targetElement.attributes.length
+	)
+		return false
+
+	for (const attr of targetElement.attributes) if (liveElement.getAttribute(attr.name) !== attr.value) return false
+
+	return true
+}
+
+/**
+ * Reuse matching live DOM nodes and replace mismatches with template-owned
+ * nodes, walking children in order without keyed diffing.
+ *
+ * @param {Element | ShadowRoot | DocumentFragment | Element} parentNode
+ * @param {Node[]} liveNodes
+ * @param {Node[]} targetNodes
+ * @param {Map<Node, Node>} adoptionMap
+ * @param {Node | null} nextSibling
+ */
+function reconcileHydrationNodes(parentNode, liveNodes, targetNodes, adoptionMap, nextSibling = null) {
+	let liveIndex = 0
+	let targetIndex = 0
+
+	while (liveIndex < liveNodes.length || targetIndex < targetNodes.length) {
+		const liveNode = liveNodes[liveIndex]
+		const targetNode = targetNodes[targetIndex]
+
+		if (!liveNode && targetNode) {
+			parentNode.insertBefore(targetNode, nextSibling)
+			adoptSubtree(adoptionMap, targetNode)
+			targetIndex++
+			continue
+		}
+
+		if (liveNode && !targetNode) {
+			const removableNode = /** @type {ChildNode} */ (liveNode)
+			removableNode.remove()
+			liveIndex++
+			continue
+		}
+
+		// Attempt to a bit forgiving on whitespace differences between SSR/live DOM
+		// and target DOM, before using stricter canHydrateNode() check
+		if (
+			liveNode.nodeType === Node.TEXT_NODE &&
+			liveNode.nodeValue?.trim() === '' &&
+			targetNode.nodeType !== Node.TEXT_NODE &&
+			!(parentNode instanceof Element && parentNode.tagName === 'PRE')
+		) {
+			const removableNode = /** @type {ChildNode} */ (liveNode)
+			removableNode.remove()
+			liveIndex++
+			continue
+		}
+		if (
+			targetNode.nodeType === Node.TEXT_NODE &&
+			targetNode.nodeValue?.trim() === '' &&
+			liveNode.nodeType !== Node.TEXT_NODE &&
+			!(parentNode instanceof Element && parentNode.tagName === 'PRE')
+		) {
+			parentNode.insertBefore(targetNode, liveNode)
+			adoptSubtree(adoptionMap, targetNode)
+			targetIndex++
+			continue
+		}
+
+		if (!canHydrateNode(liveNode, targetNode)) {
+			parentNode.replaceChild(targetNode, liveNode)
+			adoptSubtree(adoptionMap, targetNode)
+			liveIndex++
+			targetIndex++
+			continue
+		}
+
+		adoptionMap.set(targetNode, liveNode)
+
+		if (liveNode.nodeType === Node.TEXT_NODE || liveNode.nodeType === Node.CDATA_SECTION_NODE) {
+			if (liveNode.nodeValue !== targetNode.nodeValue) liveNode.nodeValue = targetNode.nodeValue
+		} else if (liveNode.nodeType === Node.ELEMENT_NODE) {
+			const liveElement = /** @type {Element} */ (liveNode)
+			reconcileHydrationNodes(
+				liveElement,
+				Array.from(liveElement.childNodes),
+				Array.from(targetNode.childNodes),
+				adoptionMap,
+				null,
+			)
+		}
+
+		liveIndex++
+		targetIndex++
+	}
 }
 
 /**
@@ -677,23 +1030,172 @@ class TemplateInstance {
 	}
 
 	/**
+	 * Absorb live nodes mapped for adoption into this template instance.
+	 *
+	 * @param {Map<Node, Node>} adoptionMap
+	 */
+	absorb(adoptionMap) {
+		this.nodes = /** @type {TemplateNodes} */ (
+			Object.freeze(this.nodes.map(node => /** @type {Element | Text} */ (adoptionMap.get(node) || node)))
+		)
+		const reboundElementStates = new WeakSet()
+		for (const site of this.sites) {
+			const previousNode = site.node
+			const node = /** @type {Element | Text} */ (adoptionMap.get(site.node) || site.node)
+			site.node = node
+			if (site.insertedNodes)
+				site.insertedNodes = site.insertedNodes.map(
+					node => /** @type {Element | Text} */ (adoptionMap.get(node) || node),
+				)
+			const elementState = site.elementState
+			if (!elementState || node === previousNode || reboundElementStates.has(elementState)) continue
+
+			for (const [eventName, eventState] of elementState.eventBindings || []) {
+				if (eventState.internalHandler) previousNode.removeEventListener(eventName, eventState.internalHandler)
+				eventState.internalHandler = undefined
+				if (eventState.currentEventListener)
+					updateEventHandler(/** @type {Element} */ (node), eventName, eventState, eventState.currentEventListener)
+			}
+
+			if (/** @type {Element} */ (node).localName.includes('-'))
+				for (const binding of elementState.lastBindings?.values() || [])
+					if (binding.type === 'property') /** @type {any} */ (node)[binding.attributeName] = binding.value
+
+			reboundElementStates.add(elementState)
+		}
+		return this
+	}
+
+	/**
 	 * Apply values to interpolation sites
 	 * @param {InterpolationValue[]} values
 	 */
 	applyValues(values) {
 		const sites = this.sites
+		let currentElement = null
+		let currentElementState = null
+		let currentBindings = null
+
+		const flushElementBindings = () => {
+			if (!currentElement || !currentElementState || !currentBindings) return
+
+			const element = /** @type {Element} */ (currentElement)
+			const anyElement = /** @type {any} */ (element)
+			const lastBindings = currentElementState.lastBindings || new Map()
+			const eventBindings = currentElementState.eventBindings || new Map()
+
+			for (const [key, binding] of lastBindings) {
+				if (currentBindings.has(key)) continue
+
+				if (binding.type === 'event') {
+					const eventState = eventBindings.get(binding.attributeName)
+					if (eventState) {
+						if (eventState.internalHandler)
+							element.removeEventListener(binding.attributeName, eventState.internalHandler)
+						eventBindings.delete(binding.attributeName)
+					}
+				} else if (binding.type === 'property') {
+					anyElement[binding.attributeName] = undefined
+				} else element.removeAttribute(binding.attributeName)
+			}
+
+			for (const [key, binding] of currentBindings) {
+				const previous = lastBindings.get(key)
+				if (
+					!binding.force &&
+					previous &&
+					previous.type === binding.type &&
+					previous.attributeName === binding.attributeName &&
+					previous.value === binding.value
+				)
+					continue
+
+				if (binding.type === 'event') {
+					let eventState = eventBindings.get(binding.attributeName)
+					if (!eventState) eventBindings.set(binding.attributeName, (eventState = {}))
+					updateEventHandler(element, binding.attributeName, eventState, binding.value)
+				} else if (binding.type === 'property') {
+					anyElement[binding.attributeName] = binding.value
+				} else if (binding.type === 'boolean-attribute') {
+					if (binding.value) element.setAttribute(binding.attributeName, '')
+					else element.removeAttribute(binding.attributeName)
+				} else {
+					element.setAttribute(binding.attributeName, binding.value)
+				}
+			}
+
+			currentElementState.lastBindings = currentBindings
+			currentElementState.eventBindings = eventBindings.size ? eventBindings : undefined
+			currentElement = null
+			currentElementState = currentBindings = null
+		}
 
 		for (const site of sites) {
 			if (site.type === 'text') {
+				flushElementBindings()
 				// With pre-split text nodes, each text site corresponds to exactly one interpolation
 				const value = values[/** @type {number} */ (site.interpolationIndex)]
 				interpolateTextSite(site, value)
-			} else if (site.type === 'attribute') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
+				continue
+			}
 
-				// Handle force detection and unwrapping for attribute values
-				// Check each interpolated value and handle force detection
+			const element = /** @type {Element} */ (site.node)
+			if (element !== currentElement) {
+				flushElementBindings()
+				currentElement = element
+				currentElementState = site.elementState
+				currentBindings = new Map()
+			}
+
+			const parts = site.parts || []
+			if (site.type === 'spread') {
+				const spreadValue = handleForceValue(site, values[/** @type {number} */ (site.interpolationIndex)])
+				if (
+					spreadValue == null ||
+					spreadValue === false ||
+					typeof spreadValue !== 'object' ||
+					Array.isArray(spreadValue) ||
+					spreadValue instanceof Node
+				)
+					continue
+
+				for (const [name, inputValue] of Object.entries(spreadValue)) {
+					/** @type {'attribute'|'boolean-attribute'|'property'|'event'} */
+					let type = 'attribute'
+					let attributeName = name
+					let bindingValue = inputValue
+
+					if (name.startsWith('?')) {
+						type = 'boolean-attribute'
+						attributeName = name.slice(1)
+						bindingValue = !!inputValue
+					} else if (name.startsWith('.')) {
+						type = 'property'
+						attributeName = name.slice(1)
+					} else if (name.startsWith('@')) {
+						type = 'event'
+						attributeName = name.slice(1)
+						if (inputValue == null || inputValue === '' || inputValue === false) {
+							currentBindings.delete(getBindingKey(type, attributeName))
+							continue
+						}
+					} else {
+						if (inputValue instanceof Node || Array.isArray(inputValue) || typeof inputValue === 'function')
+							throw new Error(ATTRIBUTE_SITE_ERROR)
+						bindingValue = String(inputValue ?? '')
+					}
+
+					currentBindings.set(getBindingKey(type, attributeName), {
+						type,
+						attributeName,
+						value: bindingValue,
+						force: site.skipEqualityCheck,
+					})
+				}
+				continue
+			}
+
+			if (site.type === 'attribute') {
 				const attributeValues = parts
 					.filter(part => typeof part === 'number')
 					.map(part => {
@@ -712,127 +1214,68 @@ class TemplateInstance {
 						return value
 					})
 
-				if (!site.skipEqualityCheck && arrayEquals(/** @type {unknown[]} */ (site.lastValue), attributeValues)) continue // No change
+				if (attributeValues.some(value => value instanceof Node || Array.isArray(value) || typeof value === 'function'))
+					throw new Error(ATTRIBUTE_SITE_ERROR)
 
-				// Check if any attribute value would produce DOM nodes - not allowed in attributes
-				if (
-					attributeValues.some(value => value instanceof Node || Array.isArray(value) || typeof value === 'function')
-				) {
-					throw new Error(
-						'Nested templates and DOM elements are not allowed in attributes. Use text content interpolation instead.',
-					)
-				}
-
-				// Create values array with unwrapped values for string joining
 				const processedValues = [...values]
 				let attributeValueIndex = 0
 				for (const part of parts)
 					if (typeof part === 'number') processedValues[part] = attributeValues[attributeValueIndex++]
 
-				const newAttributeValue = joinPartsWithValues(parts, processedValues)
-				element.setAttribute(site.attributeName || '', newAttributeValue)
-				site.lastValue = attributeValues
-			} else if (site.type === 'boolean-attribute') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
+				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
+					type: site.type,
+					attributeName: site.attributeName || '',
+					value: joinPartsWithValues(parts, processedValues),
+					force: site.skipEqualityCheck,
+				})
+				continue
+			}
 
+			if (site.type === 'boolean-attribute') {
 				let setAttribute = false
-				// Pure interpolation - pattern is ['', number, '']
 				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
 					setAttribute = !!handleForceValue(site, values[parts[1]])
-				// Static content - single string part
 				else if (parts.length === 1 && typeof parts[0] === 'string') setAttribute = parts[0].trim() !== ''
-				// Mixed content - always truthy (has both static and dynamic parts)
 				else setAttribute = true
 
-				if (!site.skipEqualityCheck && site.lastValue === setAttribute) continue // No change
-
-				if (setAttribute) element.setAttribute(site.attributeName || '', '')
-				else element.removeAttribute(site.attributeName || '')
-
-				site.lastValue = setAttribute
-			} else if (site.type === 'property') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
-
-				let propValue
-				// Pure interpolation - pattern is ['', number, '']
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-					propValue = handleForceValue(site, values[parts[1]])
-				// Mixed content or static content
-				else {
-					// For mixed content, we need to handle force for each interpolated part
-					const processedValues = [...values]
-					for (const part of parts)
-						if (typeof part === 'number') processedValues[part] = handleForceValue(site, values[part])
-					propValue = joinPartsWithValues(parts, processedValues)
-				}
-
-				if (!site.skipEqualityCheck && site.lastValue === propValue) continue // No change
-
-				const propName = site.attributeName || ''
-				const anyElement = /** @type {any} */ (element)
-				anyElement[propName] = propValue
-				site.lastValue = propValue
-			} else if (site.type === 'event') {
-				const element = /** @type {Element} */ (site.node)
-				const parts = site.parts || []
-				const eventName = site.attributeName || ''
-
-				// Determine the current handler value for comparison
-				let inputValue
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-					inputValue = handleForceValue(site, values[parts[1]])
-				else {
-					// For mixed content, handle force for each interpolated part
-					const processedValues = [...values]
-					for (const part of parts)
-						if (typeof part === 'number') processedValues[part] = handleForceValue(site, values[part])
-					inputValue = joinPartsWithValues(parts, processedValues)
-				}
-
-				// Only update event handler if it has changed
-				if (!site.skipEqualityCheck && site.lastValue === inputValue) continue // No change
-
-				// Determine the actual event listener to use
-				let eventListener
-				// Pure interpolation - pattern is ['', number, '']
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number') {
-					// Pure interpolation
-					if (typeof inputValue === 'function') eventListener = inputValue
-					else if (typeof inputValue === 'string')
-						eventListener = /** @type {EventListener} */ (new Function('event', inputValue))
-					else if (inputValue == null || inputValue === '' || inputValue === false) eventListener = null
-					else throw new TypeError(`Event handler for ${eventName} must be a function or string`)
-				} else {
-					// Mixed content - treat as code string
-					const handlerCode = joinPartsWithValues(parts, values)
-					if (handlerCode.trim() === '') eventListener = null
-					else eventListener = /** @type {EventListener} */ (new Function('event', handlerCode))
-				}
-
-				// Optimized event handler management
-				if (eventListener) {
-					// We have a valid event listener
-					if (!site.internalHandler) {
-						// Create a stable wrapper function that calls the current handler
-						site.internalHandler = /** @type {EventListener} */ (event => site.currentEventListener?.(event))
-						element.addEventListener(eventName, site.internalHandler)
-					}
-					// Update the current handler reference (no DOM manipulation needed)
-					site.currentEventListener = /** @type {EventListener} */ (eventListener)
-				} else {
-					// We have a falsy event listener, remove the internal handler if it exists
-					if (site.internalHandler) {
-						element.removeEventListener(eventName, site.internalHandler)
-						site.internalHandler = undefined
-						site.currentEventListener = undefined
-					}
-				}
-
-				site.lastValue = inputValue
+				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
+					type: site.type,
+					attributeName: site.attributeName || '',
+					value: setAttribute,
+					force: site.skipEqualityCheck,
+				})
+				continue
 			}
+
+			if (site.type === 'property') {
+				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
+					type: site.type,
+					attributeName: site.attributeName || '',
+					value: resolveSiteValue(site, values),
+					force: site.skipEqualityCheck,
+				})
+				continue
+			}
+
+			const eventName = site.attributeName || ''
+			let inputValue = resolveSiteValue(site, values)
+			if (typeof inputValue === 'string' && inputValue.trim() === '') inputValue = null
+
+			const bindingKey = getBindingKey(site.type, eventName)
+			if (inputValue == null || inputValue === '' || inputValue === false) {
+				currentBindings.delete(bindingKey)
+				continue
+			}
+
+			currentBindings.set(bindingKey, {
+				type: site.type,
+				attributeName: eventName,
+				value: inputValue,
+				force: site.skipEqualityCheck,
+			})
 		}
+
+		flushElementBindings()
 	}
 }
 
@@ -840,21 +1283,19 @@ class TemplateInstance {
 /** @typedef {unknown} InterpolationValue */
 /** @typedef {symbol | object | function} WeakMapKey */
 /** @typedef {WeakMapKey} TemplateKey */
-
 /**
  * Holds information about an interpolation site in the template, f.e. the
  * `${...}` in `<div>${...}</div>` or `<button .onclick=${...}>`.
  *
  * @typedef {{
  *   node: Element | Text,
- *   type: 'text'|'attribute'|'event'|'boolean-attribute'|'property',
+ *   type: 'text'|'attribute'|'event'|'boolean-attribute'|'property'|'spread',
  *   attributeName?: string,
  *   parts?: Array<string | number>,
  *   interpolationIndex?: number,
  *   insertedNodes?: (Element | Text)[],
  *   lastValue?: unknown,
- *   internalHandler?: EventListener,
- *   currentEventListener?: EventListener,
+ *   elementState?: { lastBindings?: Map<string, { type: 'attribute'|'boolean-attribute'|'property'|'event', attributeName: string, value: unknown, force?: boolean }>, eventBindings?: Map<string, { currentEventListener?: EventListener, internalHandler?: EventListener }> },
  *   skipEqualityCheck?: boolean,
  *   requiresUnwrapping?: boolean
  * }} InterpolationSite

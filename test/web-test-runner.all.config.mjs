@@ -3,7 +3,7 @@ import {importMapsPlugin} from '@web/dev-server-import-maps'
 
 /** @type {TestRunnerConfig} */
 export default {
-	files: 'test/**/*.test.js',
+	files: ['test/**/*.test.js'],
 	nodeResolve: true,
 
 	plugins: [

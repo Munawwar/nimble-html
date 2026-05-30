@@ -99,6 +99,272 @@ describe('html template function', () => {
 		assertEquals(div2.textContent, 'second call', 'Content should be updated')
 	})
 
+	it('keeps hydration idempotent when reusing the same key and live nodes', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '<button>save</button>'
+		const liveButton = /** @type {HTMLButtonElement} */ (container.firstChild)
+		const key = Symbol()
+		let clicked = 0
+		const view = html`<button @click=${() => clicked++}>save</button>`
+
+		const [button1] = /** @type {[HTMLButtonElement]} */ (view(key, [liveButton]))
+		const [button2] = /** @type {[HTMLButtonElement]} */ (view(key, [liveButton]))
+
+		assertEquals(button1, liveButton, 'First hydration should reuse the existing button')
+		assertEquals(button2, liveButton, 'Repeated hydration should keep the same live button')
+		liveButton.click()
+		assertEquals(clicked, 1, 'Repeated hydration should not duplicate event listeners')
+	})
+
+	it('ignores formatting whitespace text nodes when hydrating a live slice', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '\n<div><input value="hello"></div>\n'
+		const liveDiv = /** @type {HTMLDivElement} */ (container.childNodes[1])
+		const liveInput = /** @type {HTMLInputElement} */ (liveDiv.firstChild)
+		liveInput.value = 'hello world'
+		const key = Symbol()
+
+		const [div] = /** @type {[HTMLDivElement]} */ (
+			html`<div><input value=${'hello'} /></div>`(key, Array.from(container.childNodes))
+		)
+		const input = /** @type {HTMLInputElement} */ (div.firstChild)
+
+		assertEquals(div, liveDiv, 'Hydration should reuse the existing root element despite surrounding whitespace')
+		assertEquals(input, liveInput, 'Hydration should reuse the existing input node')
+		assertEquals(input.value, 'hello world', 'Hydration should preserve the live input value')
+	})
+
+	it('inserts formatting whitespace text nodes when the target includes them', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '<section><div>one</div><div>two</div></section>'
+		const liveSection = /** @type {HTMLElement} */ (container.firstChild)
+		const liveOne = /** @type {HTMLDivElement} */ (liveSection.childNodes[0])
+		const liveTwo = /** @type {HTMLDivElement} */ (liveSection.childNodes[1])
+		const key = Symbol()
+
+		const [section] = /** @type {[HTMLElement]} */ (
+			html`
+				<section>
+					<div>one</div>
+					<div>two</div>
+				</section>
+			`(key, Array.from(container.childNodes))
+		)
+		const one = /** @type {HTMLDivElement} */ (section.childNodes[1])
+		const two = /** @type {HTMLDivElement} */ (section.childNodes[3])
+
+		assertEquals(section, liveSection, 'Hydration should reuse the section root')
+		assertEquals(one, liveOne, 'Hydration should reuse the first div')
+		assertEquals(two, liveTwo, 'Hydration should reuse the second div')
+		assertEquals(section.childNodes.length, 5, 'Hydration should insert the formatting whitespace text nodes')
+		assertTrue(section.childNodes[0] instanceof Text, 'Inserted leading child should be a text node')
+		assertTrue(section.childNodes[2] instanceof Text, 'Inserted middle child should be a text node')
+		assertTrue(section.childNodes[4] instanceof Text, 'Inserted trailing child should be a text node')
+	})
+
+	it('supports spread syntax in template order and removes stale keys', () => {
+		const key = Symbol()
+		let clicks = 0
+		let spread = /** @type {unknown} */ ({
+			'.foo': 'spread foo',
+			'.bar': 'spread bar',
+			'@click': () => clicks++,
+			'?hidden': true,
+			title: 'from spread',
+			'aria-label': 'from spread',
+		})
+
+		const render = () =>
+			/** @type {[HTMLButtonElement]} */ (
+				html`<button
+					title="before title"
+					.foo=${'before'}
+					...${spread}
+					.bar=${'after'}
+					?hidden=${false}
+					aria-label="after label"
+				></button>`(key)
+			)
+
+		const [button] = render()
+		const anyButton = /** @type {any} */ (button)
+
+		assertEquals(anyButton.foo, 'spread foo', 'Spread should override earlier explicit properties')
+		assertEquals(anyButton.bar, 'after', 'Later explicit properties should override spread values')
+		assertEquals(button.getAttribute('title'), 'from spread', 'Spread should set regular attributes')
+		assertEquals(
+			button.getAttribute('aria-label'),
+			'after label',
+			'Later static attributes should override spread values',
+		)
+		assertEquals(
+			button.hasAttribute('hidden'),
+			false,
+			'Later explicit boolean attributes should override spread values',
+		)
+
+		button.click()
+		assertEquals(clicks, 1, 'Spread should attach event listeners')
+
+		spread = {'.bar': 'next spread bar'}
+		render()
+
+		assertEquals(anyButton.foo, 'before', 'Removing a spread property should reveal earlier explicit values')
+		assertEquals(anyButton.bar, 'after', 'Later explicit values should still win after re-render')
+		assertEquals(
+			button.getAttribute('title'),
+			'before title',
+			'Removing a spread attribute should restore earlier static values',
+		)
+		assertEquals(
+			button.getAttribute('aria-label'),
+			'after label',
+			'Removing a spread attribute should preserve later static values',
+		)
+
+		spread = ['ignored']
+		render()
+
+		assertEquals(anyButton.foo, 'before', 'Array spreads should act like empty objects')
+		assertEquals(button.getAttribute('title'), 'before title', 'Array spreads should restore earlier static values')
+
+		spread = 'ignored'
+		render()
+
+		assertEquals(anyButton.foo, 'before', 'String spreads should act like empty objects')
+		assertEquals(button.getAttribute('title'), 'before title', 'String spreads should restore earlier static values')
+
+		button.click()
+		assertEquals(clicks, 1, 'Removing a spread event should detach its listener')
+	})
+
+	it('treats nullish spread plain attributes like empty strings', () => {
+		const key = Symbol()
+		let spread = /** @type {Record<string, unknown>} */ ({title: null, 'aria-label': undefined})
+
+		const render = () =>
+			/** @type {[HTMLButtonElement]} */ (html`<button ...${spread}></button>`(key))
+
+		const [button] = render()
+
+		assertEquals(button.getAttribute('title'), '', 'Null spread attributes should become empty strings')
+		assertEquals(button.getAttribute('aria-label'), '', 'Undefined spread attributes should become empty strings')
+
+		spread = {}
+		render()
+
+		assertEquals(button.getAttribute('title'), null, 'Removing nullish spread keys should remove the attributes')
+		assertEquals(button.getAttribute('aria-label'), null, 'Removing nullish spread keys should remove the attributes')
+	})
+
+	it('uses template order when multiple spreads target the same binding', () => {
+		const key = Symbol()
+		let first = /** @type {Record<string, unknown>} */ ({
+			title: 'first title',
+			'.foo': 'first foo',
+			'?hidden': true,
+			'@click': () => fired.push('first'),
+		})
+		let second = /** @type {Record<string, unknown>} */ ({
+			title: 'second title',
+			'.foo': 'second foo',
+			'?hidden': false,
+			'@click': () => fired.push('second'),
+		})
+		const fired = []
+
+		const render = () =>
+			/** @type {[HTMLButtonElement]} */ (html`<button ...${first} ...${second}></button>`(key))
+
+		const [button] = render()
+		const anyButton = /** @type {any} */ (button)
+
+		assertEquals(button.getAttribute('title'), 'second title', 'Later spreads should override earlier attributes')
+		assertEquals(anyButton.foo, 'second foo', 'Later spreads should override earlier properties')
+		assertEquals(button.hasAttribute('hidden'), false, 'Later spreads should override earlier boolean attributes')
+
+		button.click()
+		assertEquals(fired.join(','), 'second', 'Later spreads should override earlier event handlers')
+
+		second = {}
+		render()
+
+		assertEquals(button.getAttribute('title'), 'first title', 'Removing the later spread should reveal the earlier attribute')
+		assertEquals(anyButton.foo, 'first foo', 'Removing the later spread should reveal the earlier property')
+		assertEquals(button.hasAttribute('hidden'), true, 'Removing the later spread should reveal the earlier boolean attribute')
+
+		fired.length = 0
+		button.click()
+		assertEquals(fired.join(','), 'first', 'Removing the later spread should reveal the earlier event handler')
+	})
+
+	it('uses one winning event handler for spread and explicit bindings', () => {
+		const key = Symbol()
+		const fired = []
+		let spreadAtEnd = /** @type {Record<string, unknown>} */ ({'@click': () => fired.push('spread-end')})
+		let spreadBeforeExplicit = /** @type {Record<string, unknown>} */ ({
+			'@click': () => fired.push('spread-before-explicit'),
+		})
+
+		const render = () =>
+			/** @type {[HTMLButtonElement, HTMLButtonElement]} */ (
+				html`
+					<button @click=${() => fired.push('explicit-before')} ...${spreadAtEnd}></button>
+					<button ...${spreadBeforeExplicit} @click=${() => fired.push('explicit-after')}></button>
+				`(key)
+			)
+
+		const [spreadWins, explicitWins] = render()
+
+		spreadWins.click()
+		explicitWins.click()
+		assertEquals(fired.join(','), 'spread-end,explicit-after', 'Only the final binding for each event should fire')
+
+		fired.length = 0
+		spreadAtEnd = {}
+		spreadBeforeExplicit = {}
+		render()
+
+		spreadWins.click()
+		explicitWins.click()
+		assertEquals(
+			fired.join(','),
+			'explicit-before,explicit-after',
+			'Removing spread handlers should reveal explicit handlers without stacking',
+		)
+	})
+
+	it('pseudo-hydrates spread events and custom props without clobbering native state', () => {
+		const container = document.createElement('div')
+		container.innerHTML = '<spread-hydrate-el title="live"></spread-hydrate-el><button title="live"></button>'
+		const liveCustom = /** @type {HTMLElement} */ (container.childNodes[0])
+		const liveButton = /** @type {HTMLButtonElement} */ (container.childNodes[1])
+		const key = Symbol()
+		let eventsFired = 0
+
+		const [custom, button] = /** @type {[HTMLElement, HTMLButtonElement]} */ (
+			html`
+				<spread-hydrate-el ...${{'.foo': 'bar', '@ping': () => eventsFired++, title: 'live'}}></spread-hydrate-el>
+				<button ...${{'.foo': 'bar', '@click': () => eventsFired++, title: 'live'}}></button>
+			`(key, Array.from(container.childNodes))
+		)
+
+		assertEquals(custom, liveCustom, 'Hydration should reuse the existing custom element')
+		assertEquals(button, liveButton, 'Hydration should reuse the existing native element')
+		assertEquals(/** @type {any} */ (custom).foo, 'bar', 'Hydration should initialize custom element props from spread')
+		assertEquals(custom.getAttribute('title'), 'live', 'Hydration should preserve native attributes on custom elements')
+		assertEquals(/** @type {any} */ (button).foo, undefined, 'Hydration should skip native props from spread')
+		assertEquals(
+			button.getAttribute('title'),
+			'live',
+			'Hydration should preserve native attributes on standard elements',
+		)
+
+		custom.dispatchEvent(new Event('ping'))
+		button.click()
+		assertEquals(eventsFired, 2, 'Hydration should attach spread event listeners')
+	})
+
 	it('returns different instances for different keys', () => {
 		const key1 = Symbol()
 		const key2 = Symbol()
@@ -1013,7 +1279,6 @@ describe('html template function', () => {
 			</ul>`(key)
 		)
 		document.body.append(ul2)
-		console.log(...ul2.children)
 
 		assertEquals(ul2.children.length, 3, 'Should have 3 list items for nested arrays')
 		assertEquals(ul2.children[0].textContent, 'apple', 'First nested item should be "apple"')
@@ -1104,6 +1369,53 @@ describe('html template function', () => {
 		assertTrue(container.textContent.includes('42'), 'Should contain number as text')
 
 		container.remove()
+	})
+
+	it('reconciles node arrays without replacing settled siblings', async () => {
+		const key = Symbol()
+		const a = document.createElement('span')
+		const b = document.createElement('span')
+		const c = document.createElement('span')
+		const d = document.createElement('span')
+		a.textContent = 'a'
+		b.textContent = 'b'
+		c.textContent = 'c'
+		d.textContent = 'd'
+
+		/** @param {Node[]} items */
+		const render = items => /** @type {[HTMLDivElement]} */ (html`<div>${items}</div>`(key))
+
+		const [div] = render([a, b, c])
+		document.body.append(div)
+
+		/** @type {MutationRecord[]} */
+		const mutations = []
+		const observer = new MutationObserver(records => mutations.push(...records))
+		observer.observe(div, {childList: true})
+
+		const [div2] = render([a, b, c, d])
+		await Promise.resolve()
+		const children = Array.from(div.children)
+
+		assertEquals(div, div2, 'Should update the same container instance')
+		assertEquals(children.length, 4, 'Should append one new child')
+		assertEquals(children[0], a, 'Should preserve the first child')
+		assertEquals(children[1], b, 'Should preserve the second child')
+		assertEquals(children[2], c, 'Should preserve the third child')
+		assertEquals(children[3], d, 'Should append the new child at the end')
+		assertEquals(
+			mutations.reduce((count, mutation) => count + mutation.removedNodes.length, 0),
+			0,
+			'Should not remove settled siblings when appending',
+		)
+		assertEquals(
+			mutations.reduce((count, mutation) => count + mutation.addedNodes.length, 0),
+			1,
+			'Should only insert the appended child',
+		)
+
+		observer.disconnect()
+		div.remove()
 	})
 
 	it('handles case-sensitive property names', () => {
