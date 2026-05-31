@@ -149,6 +149,36 @@ representable in HTML and would otherwise create hydration mismatches. For
 initial server HTML state, prefer real attributes such as `value=${...}`,
 `checked=${...}`, or `?disabled=${...}` where appropriate.
 
+### SSR assumptions
+
+`nimble-html/ssr` is a serializer for valid template markup, not a full HTML
+repair layer. SSR assumes the template author is responsible for producing
+markup that the browser will parse into the same structure during hydration.
+
+In practice that means:
+
+- write explicit, well-formed markup with matching start and end tags
+- do not rely on omitted optional end tags such as `li`, `p`, or table-related tags
+- do not rely on browser error recovery for incorrect nesting or malformed markup
+- keep table markup structurally explicit; do not rely on the browser inserting implicit elements such as `tbody`
+- place rootless `svg` and `mathml` fragments into the correct final document context yourself
+
+If the browser reparses the server HTML into a different DOM tree than the
+client template expects, hydration can bail out or replace nodes. The intended
+workflow is to catch these cases with linting and tests rather than having SSR
+silently guess how to repair them.
+
+Both the browser runtime and the `nimble-html/ssr` entrypoint now also expose:
+
+- `unsafeHTML(htmlString)` for explicit raw HTML insertion in text holes
+- `unsafeSVG(svgString)` for explicit raw SVG insertion in text holes
+- `unsafeMathML(mathmlString)` for explicit raw MathML insertion in text holes
+- `rawText(text)` for content inside `script`, `style`, and `textarea`, with
+  SSR-safe escaping for parser-breaking sequences like `</script>`
+
+These helpers are only valid in text-content interpolations, not attributes,
+properties, events, or spreads.
+
 # Tooling
 
 This repo now includes TypeScript-powered tooling packages under `tooling/` for checking
@@ -792,6 +822,40 @@ const template3 = html`<input .value=${force(inputValue)} />`
 **Returns:**
 
 - `Object` - A wrapped value that will always trigger DOM updates
+
+### `unsafeHTML(htmlString)`, `unsafeSVG(svgString)`, `unsafeMathML(mathmlString)`
+
+Explicitly insert trusted raw HTML, SVG, or MathML in a text-content interpolation:
+
+```js
+import {html, unsafeHTML, unsafeSVG, unsafeMathML} from 'nimble-html'
+
+const htmlTemplate = html`<div>${unsafeHTML('<span>trusted</span>')}</div>`
+const svgTemplate = html`<svg>${unsafeSVG('<circle cx="5" cy="5" r="5"></circle>')}</svg>`
+const mathTemplate = html`<math>${unsafeMathML('<mi>x</mi>')}</math>`
+```
+
+Use these only with already-trusted or already-sanitized content. `unsafeSVG()`
+is for SVG partials, and `unsafeMathML()` is for MathML partials. They are not
+valid in attribute, property, event, or spread interpolations.
+
+### `rawText(text)`
+
+Use this for trusted content inside `script`, `style`, and `textarea`:
+
+```js
+import {html, rawText} from 'nimble-html/ssr'
+
+const page = html`<script>
+  ${rawText('var x = "</script>";')}
+</script>`
+```
+
+In the browser runtime this behaves like literal text insertion. In SSR it
+rewrites parser-breaking sequences like `</script>` so text content inside
+`script`, `style`, or `textarea` does not accidentally terminate the surrounding
+element early. It is not valid in attribute, property, event, or spread
+interpolations.
 
 # Development
 

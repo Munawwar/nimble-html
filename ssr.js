@@ -4,6 +4,10 @@
 
 const FORCE_SYMBOL = Symbol('force')
 const TEMPLATE_RESULT_SYMBOL = Symbol('template-result')
+const UNSAFE_HTML_SYMBOL = Symbol('unsafe-html')
+const UNSAFE_SVG_SYMBOL = Symbol('unsafe-svg')
+const UNSAFE_MATHML_SYMBOL = Symbol('unsafe-mathml')
+const RAW_TEXT_SYMBOL = Symbol('raw-text')
 const INTERPOLATION_MARKER = '⧙⧘'
 const INTERPOLATION_PARTS_REGEXP = new RegExp(`${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}`)
 const SPREAD_SITE_REGEXP = new RegExp(`^\\.\\.\\.${INTERPOLATION_MARKER}(\\d+)${INTERPOLATION_MARKER}$`)
@@ -26,6 +30,19 @@ const VOID_ELEMENTS = new Set([
 
 const ATTRIBUTE_SITE_ERROR =
 	'Nested templates and DOM elements are not allowed in attributes. Use text content interpolation instead.'
+const TRUSTED_TEXT_INPUT_ERROR = 'unsafeHTML(), unsafeSVG(), unsafeMathML(), and rawText() expect a string.'
+const TRUSTED_TEXT_CONTEXT_ERROR =
+	'unsafeHTML(), unsafeSVG(), unsafeMathML(), and rawText() are only allowed in text content interpolation.'
+const RAW_TEXT_REPLACEMENTS = [
+	[/<\/script(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+	[/<script(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+	[/<!--/g, '\\x3C!--'],
+	[/<\/style(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+	[/<style(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+	[/<\/textarea(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+	[/<\/title(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+	[/<\/template(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
+]
 
 /** @typedef {'html' | 'svg' | 'mathml'} TemplateMode */
 /** @typedef {unknown} InterpolationValue */
@@ -48,6 +65,14 @@ const ATTRIBUTE_SITE_ERROR =
  *   name: string,
  *   value: unknown,
  * }} Binding
+ */
+/**
+ * @typedef {{
+ *   [UNSAFE_HTML_SYMBOL]?: string,
+ *   [UNSAFE_SVG_SYMBOL]?: string,
+ *   [UNSAFE_MATHML_SYMBOL]?: string,
+ *   [RAW_TEXT_SYMBOL]?: string,
+ * }} TrustedTextValue
  */
 
 /**
@@ -83,6 +108,35 @@ export function force(value) {
 }
 
 /**
+ * @param {symbol} symbol
+ * @param {string} value
+ */
+function wrapTrustedTextValue(symbol, value) {
+	if (typeof value !== 'string') throw new TypeError(TRUSTED_TEXT_INPUT_ERROR)
+	return {[symbol]: value}
+}
+
+/** @param {string} value */
+export function unsafeHTML(value) {
+	return wrapTrustedTextValue(UNSAFE_HTML_SYMBOL, value)
+}
+
+/** @param {string} value */
+export function unsafeSVG(value) {
+	return wrapTrustedTextValue(UNSAFE_SVG_SYMBOL, value)
+}
+
+/** @param {string} value */
+export function unsafeMathML(value) {
+	return wrapTrustedTextValue(UNSAFE_MATHML_SYMBOL, value)
+}
+
+/** @param {string} value */
+export function rawText(value) {
+	return wrapTrustedTextValue(RAW_TEXT_SYMBOL, value)
+}
+
+/**
  * @param {InterpolationValue | TemplateView | TemplateResult | readonly InterpolationValue[]} value
  * @returns {string}
  */
@@ -90,17 +144,12 @@ export function renderToString(value) {
 	return serializeChildValue(value)
 }
 
-/** @param {InterpolationValue} value */
-function isForceWrapped(value) {
-	return typeof value === 'object' && value !== null && FORCE_SYMBOL in value
-}
-
 /**
  * @param {InterpolationValue} value
  * @returns {InterpolationValue}
  */
 function unwrapForce(value) {
-	return isForceWrapped(value) ? value[FORCE_SYMBOL] : value
+	return typeof value === 'object' && value !== null && FORCE_SYMBOL in value ? value[FORCE_SYMBOL] : value
 }
 
 /**
@@ -129,18 +178,11 @@ function serializeChildValue(value) {
 	if (value == null || value === '') return ''
 	if (Array.isArray(value)) return value.map(serializeChildValue).join('')
 	if (typeof value === 'function') return serializeChildValue(value())
-	if (looksTemplateValue(value)) return serializeTemplateResult(/** @type {TemplateResult} */ (value))
+	if (looksTrustedTextValue(value)) return serializeTrustedTextValue(value)
+	if (looksTemplateValue(value)) return serializeTemplateWithValues(/** @type {TemplateResult} */ (value), value.values)
 	if (looksLikeNode(value)) throw new Error('DOM nodes are not supported by nimble-html/ssr')
 
-	return escapeTextValue(String(value))
-}
-
-/**
- * @param {TemplateResult} result
- * @returns {string}
- */
-function serializeTemplateResult(result) {
-	return serializeTemplateWithValues(result, result.values)
+	return escapeHtml(String(value))
 }
 
 /**
@@ -170,6 +212,13 @@ function serializeTemplateWithValues(result, values) {
 		if (source.startsWith('<!--', cursor)) {
 			const commentEnd = source.indexOf('-->', cursor + 4)
 			const end = commentEnd === -1 ? source.length : commentEnd + 3
+			output += source.slice(cursor, end)
+			cursor = end
+			continue
+		}
+		if (source.startsWith('<![CDATA[', cursor)) {
+			const cdataEnd = source.indexOf(']]>', cursor + 9)
+			const end = cdataEnd === -1 ? source.length : cdataEnd + 3
 			output += source.slice(cursor, end)
 			cursor = end
 			continue
@@ -312,10 +361,18 @@ function applyAttributeBinding(bindings, name, rawValue, values) {
 
 	if (name.startsWith('?') || name.startsWith('!?')) {
 		const attributeName = name.slice(name[1] === '?' ? 2 : 1)
+		let value = false
+		if (rawValue != null) {
+			const parts = parseInterpolationParts(rawValue)
+			if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
+				value = !!unwrapForce(values[parts[1]])
+			else if (parts.length === 1 && typeof parts[0] === 'string') value = parts[0].trim() !== ''
+			else value = true
+		}
 		bindings.set(`?${attributeName}`, {
 			type: 'boolean-attribute',
 			name: attributeName,
-			value: resolveBooleanAttributeValue(rawValue, values),
+			value,
 		})
 		return
 	}
@@ -362,27 +419,9 @@ function applySpreadBindings(bindings, spreadValue) {
 		bindings.set(name, {
 			type: 'attribute',
 			name,
-			value: escapeAttributeValue(resolveAttributeInput(value)),
+			value: escapeHtml(resolveAttributeInput(value), true),
 		})
 	}
-}
-
-/**
- * @param {string | null} rawValue
- * @param {readonly InterpolationValue[]} values
- * @returns {boolean}
- */
-function resolveBooleanAttributeValue(rawValue, values) {
-	if (rawValue == null) return false
-
-	const parts = parseInterpolationParts(rawValue)
-
-	if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-		return !!unwrapForce(values[parts[1]])
-
-	if (parts.length === 1 && typeof parts[0] === 'string') return parts[0].trim() !== ''
-
-	return true
 }
 
 /**
@@ -394,7 +433,7 @@ function resolveAttributeValue(rawValue, values) {
 	let value = ''
 
 	for (const part of parseInterpolationParts(rawValue)) {
-		if (typeof part === 'number') value += escapeAttributeValue(resolveAttributeInput(values[part]))
+		if (typeof part === 'number') value += escapeHtml(resolveAttributeInput(values[part]), true)
 		else value += part.replaceAll('"', '&quot;')
 	}
 
@@ -409,6 +448,7 @@ function resolveAttributeInput(value) {
 	value = unwrapForce(value)
 
 	if (value == null) return ''
+	if (looksTrustedTextValue(value)) throw new Error(TRUSTED_TEXT_CONTEXT_ERROR)
 	if (typeof value === 'function' || Array.isArray(value) || looksTemplateValue(value) || looksLikeNode(value))
 		throw new Error(ATTRIBUTE_SITE_ERROR)
 
@@ -446,18 +486,12 @@ function parseInterpolationParts(value) {
 
 /**
  * @param {string} value
+ * @param {boolean} [attribute]
  * @returns {string}
  */
-function escapeTextValue(value) {
-	return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-}
-
-/**
- * @param {string} value
- * @returns {string}
- */
-function escapeAttributeValue(value) {
-	return escapeTextValue(value).replaceAll('"', '&quot;')
+function escapeHtml(value, attribute = false) {
+	value = value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+	return attribute ? value.replaceAll('"', '&quot;') : value
 }
 
 /** @param {InterpolationValue} value */
@@ -468,4 +502,32 @@ function looksTemplateValue(value) {
 /** @param {InterpolationValue} value */
 function looksLikeNode(value) {
 	return typeof value === 'object' && value !== null && 'nodeType' in value
+}
+
+/**
+ * @param {InterpolationValue} value
+ * @returns {value is TrustedTextValue}
+ */
+function looksTrustedTextValue(value) {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		(UNSAFE_HTML_SYMBOL in value ||
+			UNSAFE_SVG_SYMBOL in value ||
+			UNSAFE_MATHML_SYMBOL in value ||
+			RAW_TEXT_SYMBOL in value)
+	)
+}
+
+/**
+ * @param {TrustedTextValue} value
+ * @returns {string}
+ */
+function serializeTrustedTextValue(value) {
+	if (UNSAFE_HTML_SYMBOL in value || UNSAFE_SVG_SYMBOL in value || UNSAFE_MATHML_SYMBOL in value)
+		return value[UNSAFE_HTML_SYMBOL] || value[UNSAFE_SVG_SYMBOL] || value[UNSAFE_MATHML_SYMBOL] || ''
+	if (!(RAW_TEXT_SYMBOL in value)) return ''
+	let text = value[RAW_TEXT_SYMBOL] || ''
+	for (const [pattern, replacement] of RAW_TEXT_REPLACEMENTS) text = text.replace(pattern, replacement)
+	return text
 }

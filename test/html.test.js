@@ -1,4 +1,4 @@
-import {html, svg, mathml} from '../html.js'
+import {html, mathml, rawText, svg, unsafeHTML, unsafeMathML, unsafeSVG} from '../html.js'
 
 /**
  * @param {any} actual
@@ -16,6 +16,21 @@ function assertEquals(actual, expected, message = '') {
  */
 function assertTrue(condition, message = '') {
 	if (!condition) throw new Error(`Assertion failed: ${message}\nExpected truthy value`)
+}
+
+/**
+ * @param {() => unknown} fn
+ * @param {RegExp} pattern
+ * @param {string} message
+ */
+function assertThrows(fn, pattern, message = '') {
+	try {
+		fn()
+		throw new Error(`Assertion failed: ${message}\nExpected function to throw`)
+	} catch (error) {
+		if (error instanceof Error && pattern.test(error.message)) return
+		throw error
+	}
 }
 
 class MyTestEl extends HTMLElement {
@@ -79,6 +94,69 @@ describe('html template function', () => {
 		// beyond the first interpolated text node it replaces.
 		assertTrue(p instanceof HTMLParagraphElement, 'Should return HTMLParagraphElement')
 		testContent(p)
+	})
+
+	it('supports unsafeHTML in text interpolation and reconciles inserted nodes', () => {
+		const key = Symbol()
+		let markup = '<span>one</span><!--note--><span>two</span>'
+		const render = () => /** @type {[HTMLDivElement]} */ (html`<div>${unsafeHTML(markup)}</div>`(key))
+
+		const [div] = render()
+
+		assertEquals(
+			div.innerHTML,
+			'<span>one</span><!--note--><span>two</span>',
+			'unsafeHTML should insert parsed child nodes',
+		)
+
+		markup = '<span>updated</span>'
+		render()
+
+		assertEquals(div.innerHTML, '<span>updated</span>', 'Re-render should update parsed content')
+	})
+
+	it('supports unsafeSVG and unsafeMathML with explicit namespace parsing', () => {
+		const [svgRoot, mathRoot] = /** @type {[SVGSVGElement, Element]} */ (
+			html`<svg>${unsafeSVG('<circle cx="5" cy="5" r="5"></circle>')}</svg><math>${unsafeMathML('<mi>x</mi>')}</math>`(
+				Symbol(),
+			)
+		)
+		const circle = /** @type {SVGCircleElement} */ (svgRoot.firstElementChild)
+		const mi = /** @type {Element} */ (mathRoot.firstElementChild)
+
+		assertEquals(circle.namespaceURI, 'http://www.w3.org/2000/svg', 'unsafeSVG should create SVG nodes')
+		assertEquals(mi.namespaceURI, 'http://www.w3.org/1998/Math/MathML', 'unsafeMathML should create MathML nodes')
+	})
+
+	it('supports rawText in text interpolation without HTML parsing', () => {
+		const [script, style, textarea, title] =
+			/** @type {[HTMLScriptElement, HTMLStyleElement, HTMLTextAreaElement, HTMLTitleElement]} */ (
+				html`
+					<script>
+						${rawText('</script><b>x</b>')}
+					</script>
+					<style>
+						${rawText('</style><b>x</b>')}
+					</style>
+					<textarea>${rawText('</textarea><b>x</b>')}</textarea>
+					<title>${rawText('</title><b>x</b>')}</title>
+				`(Symbol())
+			)
+
+		assertEquals(script.textContent.trim(), '</script><b>x</b>', 'rawText should preserve literal script text')
+		assertEquals(style.textContent.trim(), '</style><b>x</b>', 'rawText should preserve literal style text')
+		assertEquals(textarea.textContent, '</textarea><b>x</b>', 'rawText should preserve literal textarea text')
+		assertEquals(title.textContent, '</title><b>x</b>', 'rawText should preserve literal title text')
+	})
+
+	it('throws when unsafe helpers or rawText are used outside text interpolation', () => {
+		assertThrows(
+			() => html`<div title=${unsafeHTML('<span>nope</span>')}></div>`(Symbol()),
+			/text content interpolation/,
+		)
+		assertThrows(() => html`<div title=${unsafeSVG('<circle></circle>')}></div>`(Symbol()), /text content interpolation/)
+		assertThrows(() => html`<div title=${unsafeMathML('<mi>x</mi>')}></div>`(Symbol()), /text content interpolation/)
+		assertThrows(() => html`<div title=${rawText('nope')}></div>`(Symbol()), /text content interpolation/)
 	})
 
 	it('returns same instance for same key', () => {

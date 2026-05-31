@@ -4,9 +4,29 @@ export type TemplateKey = WeakMapKey
 export type TemplateMode = 'html' | 'svg' | 'mathml'
 
 declare const FORCE_SYMBOL: unique symbol
+declare const UNSAFE_HTML_SYMBOL: unique symbol
+declare const UNSAFE_SVG_SYMBOL: unique symbol
+declare const UNSAFE_MATHML_SYMBOL: unique symbol
+declare const RAW_TEXT_SYMBOL: unique symbol
 
 export type ForceValue<T = unknown> = {
 	[FORCE_SYMBOL]: T
+}
+
+export type UnsafeHTMLValue = {
+	[UNSAFE_HTML_SYMBOL]: string
+}
+
+export type UnsafeSVGValue = {
+	[UNSAFE_SVG_SYMBOL]: string
+}
+
+export type UnsafeMathMLValue = {
+	[UNSAFE_MATHML_SYMBOL]: string
+}
+
+export type RawTextValue = {
+	[RAW_TEXT_SYMBOL]: string
 }
 
 export type TemplateView = ((key?: any, liveNodes?: Node[]) => TemplateNodes) & {
@@ -15,7 +35,15 @@ export type TemplateView = ((key?: any, liveNodes?: Node[]) => TemplateNodes) & 
 
 export type PrimitiveChild = string | number | boolean | bigint | null | undefined
 export type AttributeValue = string | number | boolean | bigint | null | undefined
-export type ChildValue = PrimitiveChild | Node | TemplateView | readonly ChildValue[]
+export type ChildValue =
+	| PrimitiveChild
+	| Node
+	| TemplateView
+	| UnsafeHTMLValue
+	| UnsafeSVGValue
+	| UnsafeMathMLValue
+	| RawTextValue
+	| readonly ChildValue[]
 export type EventValue<E extends Event = Event> = ((event: E) => unknown) | string | null | undefined | false | ''
 
 type ElementForTag<Tag extends string> = Tag extends keyof HTMLElementTagNameMap
@@ -47,6 +75,10 @@ export function mathml(strings: TemplateStringsArray, ...values: readonly unknow
  * Wrap a value in `force()` to indicate that it should not be checked for changes when applying updates.
  */
 export function force<T>(value: T): ForceValue<T>
+export function unsafeHTML(value: string): UnsafeHTMLValue
+export function unsafeSVG(value: string): UnsafeSVGValue
+export function unsafeMathML(value: string): UnsafeMathMLValue
+export function rawText(value: string): RawTextValue
 
 export type InterpolationValue = unknown
 export type InterpolationSite = {
@@ -55,7 +87,7 @@ export type InterpolationSite = {
 	attributeName?: string
 	parts?: Array<string | number>
 	interpolationIndex?: number
-	insertedNodes?: (Element | Text)[]
+	insertedNodes?: Node[]
 	lastValue?: unknown
 	internalHandler?: EventListener
 	currentEventListener?: EventListener

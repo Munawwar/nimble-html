@@ -42,6 +42,13 @@ export function mathml(strings, ...values) {
 
 /** Unique symbol to mark force wrapped values */
 const FORCE_SYMBOL = Symbol('force')
+const UNSAFE_HTML_SYMBOL = Symbol('unsafe-html')
+const UNSAFE_SVG_SYMBOL = Symbol('unsafe-svg')
+const UNSAFE_MATHML_SYMBOL = Symbol('unsafe-mathml')
+const RAW_TEXT_SYMBOL = Symbol('raw-text')
+const TRUSTED_TEXT_INPUT_ERROR = 'unsafeHTML(), unsafeSVG(), unsafeMathML(), and rawText() expect a string.'
+const TRUSTED_TEXT_CONTEXT_ERROR =
+	'unsafeHTML(), unsafeSVG(), unsafeMathML(), and rawText() are only allowed in text content interpolation.'
 
 /**
  * Wrap a value in `force()` to indicate that it should not be checked for
@@ -51,6 +58,35 @@ const FORCE_SYMBOL = Symbol('force')
  */
 export function force(value) {
 	return {[FORCE_SYMBOL]: value}
+}
+
+/**
+ * @param {symbol} symbol
+ * @param {string} value
+ */
+function wrapTrustedTextValue(symbol, value) {
+	if (typeof value !== 'string') throw new TypeError(TRUSTED_TEXT_INPUT_ERROR)
+	return {[symbol]: value}
+}
+
+/** @param {string} value */
+export function unsafeHTML(value) {
+	return wrapTrustedTextValue(UNSAFE_HTML_SYMBOL, value)
+}
+
+/** @param {string} value */
+export function unsafeSVG(value) {
+	return wrapTrustedTextValue(UNSAFE_SVG_SYMBOL, value)
+}
+
+/** @param {string} value */
+export function unsafeMathML(value) {
+	return wrapTrustedTextValue(UNSAFE_MATHML_SYMBOL, value)
+}
+
+/** @param {string} value */
+export function rawText(value) {
+	return wrapTrustedTextValue(RAW_TEXT_SYMBOL, value)
 }
 
 /**
@@ -70,6 +106,46 @@ function isForceWrapped(value) {
 function unwrapForce(value) {
 	if (isForceWrapped(value)) return /** @type {any} */ (value)[FORCE_SYMBOL]
 	return value
+}
+
+/**
+ * @param {InterpolationValue} value
+ * @returns {value is TrustedTextValue}
+ */
+function isTrustedTextValue(value) {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		(UNSAFE_HTML_SYMBOL in value ||
+			UNSAFE_SVG_SYMBOL in value ||
+			UNSAFE_MATHML_SYMBOL in value ||
+			RAW_TEXT_SYMBOL in value)
+	)
+}
+
+/**
+ * @param {TrustedTextValue} value
+ * @returns {string | Node[]}
+ */
+function resolveTrustedTextValue(value) {
+	if (RAW_TEXT_SYMBOL in value) return value[RAW_TEXT_SYMBOL] || ''
+	if (!(UNSAFE_HTML_SYMBOL in value || UNSAFE_SVG_SYMBOL in value || UNSAFE_MATHML_SYMBOL in value)) return ''
+
+	const template = document.createElement('template')
+	let htmlString = value[UNSAFE_HTML_SYMBOL] || value[UNSAFE_SVG_SYMBOL] || value[UNSAFE_MATHML_SYMBOL] || ''
+	const mode = UNSAFE_SVG_SYMBOL in value ? 'svg' : UNSAFE_MATHML_SYMBOL in value ? 'mathml' : 'html'
+
+	if (mode === 'svg') htmlString = `<svg>${htmlString}</svg>`
+	else if (mode === 'mathml') htmlString = `<math>${htmlString}</math>`
+
+	template.innerHTML = htmlString
+
+	if (mode === 'svg' || mode === 'mathml') {
+		const wrapper = /** @type {Element | null} */ (template.content.firstElementChild)
+		if (wrapper) wrapper.replaceWith(...wrapper.childNodes)
+	}
+
+	return Array.from(template.content.childNodes)
 }
 
 /**
@@ -819,7 +895,8 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 
 function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {InterpolationValue} */ value) {
 	// Handle force detection and unwrapping
-	const unwrappedValue = handleForceValue(site, value)
+	let unwrappedValue = handleForceValue(site, value)
+	if (isTrustedTextValue(unwrappedValue)) unwrappedValue = resolveTrustedTextValue(unwrappedValue)
 
 	if (!site.skipEqualityCheck && site.lastValue === unwrappedValue) return // No change
 	site.lastValue = unwrappedValue
@@ -845,20 +922,22 @@ function interpolateTextSite(/** @type {InterpolationSite} */ site, /** @type {I
 						// template functions at the same site but different positions don't share cache entries,
 						// even when using the same mapper function (e.g., html`<ul>${items.map(itemMapper)}</ul>`).
 						const stableKey = getStableNestedKey(site, index)
-						return item(stableKey)
+						item = item(stableKey)
 					}
+					if (isTrustedTextValue(item)) item = resolveTrustedTextValue(item)
 					// Handle arrays (already processed template results)
 					// Flatten one level because html functions return arrays
 					if (Array.isArray(item)) return item.flat(1)
 					// Handle single nodes or primitive values
 					return [item]
 				})
-				.map(item => {
+				.flatMap(item => {
+					if (isTrustedTextValue(item)) item = resolveTrustedTextValue(item)
+					if (Array.isArray(item)) return item.flat(Infinity)
 					if (item instanceof Node) return /** @type {Element | Text} */ (item)
-					if (item != null && item !== '') return new Text(String(item))
-					return null
+					if (item != null && item !== '') return [new Text(String(item))]
+					return []
 				})
-				.filter(Boolean)
 		)
 
 		if (!site.skipEqualityCheck && site.insertedNodes && arrayEquals(site.insertedNodes, nodes)) return // No change
@@ -1180,6 +1259,7 @@ class TemplateInstance {
 							continue
 						}
 					} else {
+						if (isTrustedTextValue(inputValue)) throw new Error(TRUSTED_TEXT_CONTEXT_ERROR)
 						if (inputValue instanceof Node || Array.isArray(inputValue) || typeof inputValue === 'function')
 							throw new Error(ATTRIBUTE_SITE_ERROR)
 						bindingValue = String(inputValue ?? '')
@@ -1214,6 +1294,7 @@ class TemplateInstance {
 						return value
 					})
 
+				if (attributeValues.some(isTrustedTextValue)) throw new Error(TRUSTED_TEXT_CONTEXT_ERROR)
 				if (attributeValues.some(value => value instanceof Node || Array.isArray(value) || typeof value === 'function'))
 					throw new Error(ATTRIBUTE_SITE_ERROR)
 
@@ -1233,9 +1314,11 @@ class TemplateInstance {
 
 			if (site.type === 'boolean-attribute') {
 				let setAttribute = false
-				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-					setAttribute = !!handleForceValue(site, values[parts[1]])
-				else if (parts.length === 1 && typeof parts[0] === 'string') setAttribute = parts[0].trim() !== ''
+				if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number') {
+					const value = handleForceValue(site, values[parts[1]])
+					if (isTrustedTextValue(value)) throw new Error(TRUSTED_TEXT_CONTEXT_ERROR)
+					setAttribute = !!value
+				} else if (parts.length === 1 && typeof parts[0] === 'string') setAttribute = parts[0].trim() !== ''
 				else setAttribute = true
 
 				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
@@ -1248,10 +1331,12 @@ class TemplateInstance {
 			}
 
 			if (site.type === 'property') {
+				const value = resolveSiteValue(site, values)
+				if (isTrustedTextValue(value)) throw new Error(TRUSTED_TEXT_CONTEXT_ERROR)
 				currentBindings.set(getBindingKey(site.type, site.attributeName || ''), {
 					type: site.type,
 					attributeName: site.attributeName || '',
-					value: resolveSiteValue(site, values),
+					value,
 					force: site.skipEqualityCheck,
 				})
 				continue
@@ -1259,6 +1344,7 @@ class TemplateInstance {
 
 			const eventName = site.attributeName || ''
 			let inputValue = resolveSiteValue(site, values)
+			if (isTrustedTextValue(inputValue)) throw new Error(TRUSTED_TEXT_CONTEXT_ERROR)
 			if (typeof inputValue === 'string' && inputValue.trim() === '') inputValue = null
 
 			const bindingKey = getBindingKey(site.type, eventName)
@@ -1284,6 +1370,14 @@ class TemplateInstance {
 /** @typedef {symbol | object | function} WeakMapKey */
 /** @typedef {WeakMapKey} TemplateKey */
 /**
+ * @typedef {{
+ *   [UNSAFE_HTML_SYMBOL]?: string,
+ *   [UNSAFE_SVG_SYMBOL]?: string,
+ *   [UNSAFE_MATHML_SYMBOL]?: string,
+ *   [RAW_TEXT_SYMBOL]?: string,
+ * }} TrustedTextValue
+ */
+/**
  * Holds information about an interpolation site in the template, f.e. the
  * `${...}` in `<div>${...}</div>` or `<button .onclick=${...}>`.
  *
@@ -1293,7 +1387,7 @@ class TemplateInstance {
  *   attributeName?: string,
  *   parts?: Array<string | number>,
  *   interpolationIndex?: number,
- *   insertedNodes?: (Element | Text)[],
+ *   insertedNodes?: Node[],
  *   lastValue?: unknown,
  *   elementState?: { lastBindings?: Map<string, { type: 'attribute'|'boolean-attribute'|'property'|'event', attributeName: string, value: unknown, force?: boolean }>, eventBindings?: Map<string, { currentEventListener?: EventListener, internalHandler?: EventListener }> },
  *   skipEqualityCheck?: boolean,

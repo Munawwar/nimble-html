@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import {force, html, mathml, renderToString, svg} from '../ssr.js'
+import {force, html, mathml, rawText, renderToString, svg, unsafeHTML, unsafeMathML, unsafeSVG} from '../ssr.js'
 
 test('renders text content and trims top-level formatting whitespace', () => {
 	const output = renderToString(html`
@@ -59,12 +59,13 @@ test('renders the boolean attribute matrix', () => {
 })
 
 test('renders void elements without closing tags', () => {
+	// prettier-ignore
 	const output = renderToString(html`
-		<img src=${'/a?b&c'} alt=${'x'} />
-		<input value=${'hello'} />
-		<br />
-		<meta charset="utf-8" />
-		<link rel="preload" href=${'/style.css?a&b'} />
+		<img src=${'/a?b&c'} alt=${'x'}>
+		<input value=${'hello'}>
+		<br>
+		<meta charset="utf-8">
+		<link rel="preload" href=${'/style.css?a&b'}>
 	`)
 
 	assert.equal(
@@ -77,6 +78,35 @@ test('escapes text and attribute values', () => {
 	const output = renderToString(html`<div title=${'"&<>'}>${'&<>'}</div>`)
 
 	assert.equal(output, '<div title="&quot;&amp;&lt;&gt;">&amp;&lt;&gt;</div>')
+})
+
+test('renders unsafeHTML without escaping', () => {
+	const output = renderToString(html`<div>${unsafeHTML('<span class="x">ok</span>')}</div>`)
+
+	assert.equal(output, '<div><span class="x">ok</span></div>')
+})
+
+test('renders unsafeSVG and unsafeMathML without escaping', () => {
+	assert.equal(renderToString(svg`<svg>${unsafeSVG('<circle cx="5" cy="5" r="5"></circle>')}</svg>`), '<svg><circle cx="5" cy="5" r="5"></circle></svg>')
+	assert.equal(renderToString(mathml`<math>${unsafeMathML('<mi>x</mi>')}</math>`), '<math><mi>x</mi></math>')
+})
+
+test('renders rawText with raw-text-safe replacements', () => {
+	// prettier-ignore
+	const output = renderToString(
+		html`<script>${rawText('var x = "</style></script></textarea></title></template><script><!--<style>";')}</script>`,
+	)
+
+	assert.equal(
+		output,
+		'<script>var x = "\\x3C/style>\\x3C/script>\\x3C/textarea>\\x3C/title>\\x3C/template>\\x3Cscript>\\x3C!--\\x3Cstyle>";</script>',
+	)
+})
+
+test('supports CDATA blocks during SSR', () => {
+	const output = renderToString(svg`<![CDATA[a > b]]><text>${'x'}</text>`)
+
+	assert.equal(output, '<![CDATA[a > b]]><text>x</text>')
 })
 
 test('serializes primitive text values', () => {
@@ -143,6 +173,20 @@ test('accepts force() wrappers during SSR', () => {
 	const output = renderToString(html`<div class=${force('ready')}>${force('ok')}</div>`)
 
 	assert.equal(output, '<div class="ready">ok</div>')
+})
+
+test('throws when unsafe helpers or rawText are used outside text content', () => {
+	assert.throws(() => renderToString(html`<div title=${unsafeHTML('<span>nope</span>')}></div>`), /text content/)
+	assert.throws(() => renderToString(html`<div title=${unsafeSVG('<circle></circle>')}></div>`), /text content/)
+	assert.throws(() => renderToString(html`<div title=${unsafeMathML('<mi>x</mi>')}></div>`), /text content/)
+	assert.throws(() => renderToString(html`<div title=${rawText('nope')}></div>`), /text content/)
+})
+
+test('throws when unsafe helpers or rawText receive non-string values', () => {
+	assert.throws(() => unsafeHTML(/** @type {any} */ (123)), /expect a string/)
+	assert.throws(() => unsafeSVG(/** @type {any} */ (123)), /expect a string/)
+	assert.throws(() => unsafeMathML(/** @type {any} */ (123)), /expect a string/)
+	assert.throws(() => rawText(/** @type {any} */ (html`<span>nope</span>`)), /expect a string/)
 })
 
 test('throws when nested templates are used inside attribute values', () => {
