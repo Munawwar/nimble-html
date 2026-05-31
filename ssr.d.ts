@@ -44,4 +44,5 @@ export function unsafeHTML(value: string): UnsafeHTMLValue
 export function unsafeSVG(value: string): UnsafeSVGValue
 export function unsafeMathML(value: string): UnsafeMathMLValue
 export function rawText(value: string): RawTextValue
+export function clearTemplateCache(): void
 export function renderToString(value: unknown): string
