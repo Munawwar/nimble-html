@@ -3,7 +3,18 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import {force, html, mathml, rawText, renderToString, svg, unsafeHTML, unsafeMathML, unsafeSVG} from '../ssr.js'
+import {
+	clearTemplateCache,
+	force,
+	html,
+	mathml,
+	rawText,
+	renderToString,
+	svg,
+	unsafeHTML,
+	unsafeMathML,
+	unsafeSVG,
+} from '../ssr.js'
 
 test('renders text content and trims top-level formatting whitespace', () => {
 	const output = renderToString(html`
@@ -173,6 +184,14 @@ test('accepts force() wrappers during SSR', () => {
 	const output = renderToString(html`<div class=${force('ready')}>${force('ok')}</div>`)
 
 	assert.equal(output, '<div class="ready">ok</div>')
+})
+
+test('clearTemplateCache resets compiled SSR templates without changing output', () => {
+	const template = html`<div title=${'a'}>${'b'}</div>`
+
+	assert.equal(renderToString(template), '<div title="a">b</div>')
+	clearTemplateCache()
+	assert.equal(renderToString(template), '<div title="a">b</div>')
 })
 
 test('throws when unsafe helpers or rawText are used outside text content', () => {

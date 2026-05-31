@@ -43,6 +43,7 @@ const RAW_TEXT_REPLACEMENTS = [
 	[/<\/title(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
 	[/<\/template(?=[\t\n\f\r />])/gi, match => `\\x3C${match.slice(1)}`],
 ]
+let ssrTemplateCache = new WeakMap()
 
 /** @typedef {'html' | 'svg' | 'mathml'} TemplateMode */
 /** @typedef {unknown} InterpolationValue */
@@ -66,6 +67,15 @@ const RAW_TEXT_REPLACEMENTS = [
  *   value: unknown,
  * }} Binding
  */
+/** @typedef {{ type: 'spread', index: number }} CompiledSpreadBinding */
+/** @typedef {{ type: 'attribute', name: string, parts: (string | number)[] }} CompiledAttributeBinding */
+/** @typedef {{ type: 'boolean-attribute', name: string, parts: (string | number)[] | null }} CompiledBooleanAttributeBinding */
+/** @typedef {CompiledSpreadBinding | CompiledAttributeBinding | CompiledBooleanAttributeBinding} CompiledBinding */
+/** @typedef {{ type: 'static', value: string }} StaticOp */
+/** @typedef {{ type: 'text', parts: (string | number)[] }} TextOp */
+/** @typedef {{ type: 'start-tag', tagName: string, selfClosing: boolean, voidElement: boolean, bindings: CompiledBinding[] }} StartTagOp */
+/** @typedef {StaticOp | TextOp | StartTagOp} CompiledOp */
+/** @typedef {{ ops: CompiledOp[] }} CompiledTemplate */
 /**
  * @typedef {{
  *   [UNSAFE_HTML_SYMBOL]?: string,
@@ -144,6 +154,10 @@ export function renderToString(value) {
 	return serializeChildValue(value)
 }
 
+export function clearTemplateCache() {
+	ssrTemplateCache = new WeakMap()
+}
+
 /**
  * @param {InterpolationValue} value
  * @returns {InterpolationValue}
@@ -179,19 +193,22 @@ function serializeChildValue(value) {
 	if (Array.isArray(value)) return value.map(serializeChildValue).join('')
 	if (typeof value === 'function') return serializeChildValue(value())
 	if (looksTrustedTextValue(value)) return serializeTrustedTextValue(value)
-	if (looksTemplateValue(value)) return serializeTemplateWithValues(/** @type {TemplateResult} */ (value), value.values)
+	if (looksTemplateValue(value))
+		return serializeCompiledTemplate(getCompiledTemplate(/** @type {TemplateResult} */ (value).strings), value.values)
 	if (looksLikeNode(value)) throw new Error('DOM nodes are not supported by nimble-html/ssr')
 
 	return escapeHtml(String(value))
 }
 
 /**
- * @param {TemplateResult} result
- * @param {readonly InterpolationValue[]} values
- * @returns {string}
+ * @param {TemplateStringsArray} strings
+ * @returns {CompiledTemplate}
  */
-function serializeTemplateWithValues(result, values) {
-	const source = result.strings.reduce(
+function getCompiledTemplate(strings) {
+	let compiled = ssrTemplateCache.get(strings)
+	if (compiled) return compiled
+
+	const source = strings.reduce(
 		/**
 		 * @param {string} htmlString
 		 * @param {string} string
@@ -200,11 +217,12 @@ function serializeTemplateWithValues(result, values) {
 		(htmlString, string, index) =>
 			htmlString +
 			string +
-			(index < result.values.length ? `${INTERPOLATION_MARKER}${index}${INTERPOLATION_MARKER}` : ''),
+			(index < strings.length - 1 ? `${INTERPOLATION_MARKER}${index}${INTERPOLATION_MARKER}` : ''),
 		'',
 	)
 
-	let output = ''
+	/** @type {CompiledTemplate} */
+	compiled = {ops: []}
 	let cursor = 0
 	let depth = 0
 
@@ -212,21 +230,21 @@ function serializeTemplateWithValues(result, values) {
 		if (source.startsWith('<!--', cursor)) {
 			const commentEnd = source.indexOf('-->', cursor + 4)
 			const end = commentEnd === -1 ? source.length : commentEnd + 3
-			output += source.slice(cursor, end)
+			compiled.ops.push({type: 'static', value: source.slice(cursor, end)})
 			cursor = end
 			continue
 		}
 		if (source.startsWith('<![CDATA[', cursor)) {
 			const cdataEnd = source.indexOf(']]>', cursor + 9)
 			const end = cdataEnd === -1 ? source.length : cdataEnd + 3
-			output += source.slice(cursor, end)
+			compiled.ops.push({type: 'static', value: source.slice(cursor, end)})
 			cursor = end
 			continue
 		}
 
 		if (source[cursor] === '<') {
-			const tag = readTag(source, cursor, values)
-			output += tag.output
+			const tag = compileTag(source, cursor)
+			compiled.ops.push(tag.op)
 			cursor = tag.end
 			depth += tag.depthDelta
 			continue
@@ -234,29 +252,33 @@ function serializeTemplateWithValues(result, values) {
 
 		const nextTag = source.indexOf('<', cursor)
 		const end = nextTag === -1 ? source.length : nextTag
-		output += serializeTextFragment(source.slice(cursor, end), values, depth === 0)
+		const parts = parseInterpolationParts(source.slice(cursor, end))
+		const filteredParts = depth === 0
+			? parts.filter(part => typeof part === 'number' || (typeof part === 'string' && part.trim() !== ''))
+			: parts
+		if (filteredParts.length) compiled.ops.push({type: 'text', parts: filteredParts})
 		cursor = end
 	}
 
-	return output
+	ssrTemplateCache.set(strings, compiled)
+	return compiled
 }
 
 /**
  * @param {string} source
  * @param {number} start
- * @param {readonly InterpolationValue[]} values
  */
-function readTag(source, start, values) {
+function compileTag(source, start) {
 	if (source.startsWith('</', start)) {
 		const end = source.indexOf('>', start + 2)
 		const safeEnd = end === -1 ? source.length : end + 1
-		return {output: source.slice(start, safeEnd), end: safeEnd, depthDelta: -1}
+		return {op: {type: 'static', value: source.slice(start, safeEnd)}, end: safeEnd, depthDelta: -1}
 	}
 
 	if (source[start + 1] === '!' || source[start + 1] === '?') {
 		const end = source.indexOf('>', start + 2)
 		const safeEnd = end === -1 ? source.length : end + 1
-		return {output: source.slice(start, safeEnd), end: safeEnd, depthDelta: 0}
+		return {op: {type: 'static', value: source.slice(start, safeEnd)}, end: safeEnd, depthDelta: 0}
 	}
 
 	let cursor = start + 1
@@ -275,28 +297,25 @@ function readTag(source, start, values) {
 
 	const end = Math.min(cursor + 1, source.length)
 	const raw = source.slice(start, end)
-	const output = serializeStartTag(raw, values)
-	const tagNameMatch = raw.match(/^<\s*([^\s/>]+)/)
-	const tagName = tagNameMatch?.[1]?.toLowerCase() || ''
-	const isSelfClosing = /\/\s*>$/.test(raw) || VOID_ELEMENTS.has(tagName)
+	const op = compileStartTag(raw)
 
-	return {output, end, depthDelta: isSelfClosing ? 0 : 1}
+	return {op, end, depthDelta: op.selfClosing || op.voidElement ? 0 : 1}
 }
 
 /**
  * @param {string} raw
- * @param {readonly InterpolationValue[]} values
- * @returns {string}
+ * @returns {StartTagOp}
  */
-function serializeStartTag(raw, values) {
+function compileStartTag(raw) {
 	let cursor = 1
 	let tagName = ''
 
 	while (cursor < raw.length && !/[\s/>]/.test(raw[cursor])) tagName += raw[cursor++]
+	const lowerTagName = tagName.toLowerCase()
 
-	/** @type {Map<string, Binding>} */
-	const bindings = new Map()
 	let isSelfClosing = false
+	/** @type {CompiledBinding[]} */
+	const bindings = []
 
 	while (cursor < raw.length - 1) {
 		while (cursor < raw.length - 1 && /\s/.test(raw[cursor])) cursor++
@@ -333,63 +352,90 @@ function serializeStartTag(raw, values) {
 			}
 		}
 
-		applyAttributeBinding(bindings, name, value, values)
+		const spreadMatch = name.match(SPREAD_SITE_REGEXP)
+		if (spreadMatch) {
+			bindings.push({type: 'spread', index: Number(spreadMatch[1])})
+			continue
+		}
+
+		if (name.startsWith('?') || name.startsWith('!?')) {
+			bindings.push({
+				type: 'boolean-attribute',
+				name: name.slice(name[1] === '?' ? 2 : 1),
+				parts: value == null ? null : parseInterpolationParts(value),
+			})
+			continue
+		}
+
+		if (name.startsWith('.') || name.startsWith('!.') || name.startsWith('@') || name.startsWith('!@')) continue
+
+		bindings.push({
+			type: 'attribute',
+			name: name.startsWith('!') ? name.slice(1) : name,
+			parts: value == null ? [''] : parseInterpolationParts(value),
+		})
 	}
 
-	let output = `<${tagName}`
-
-	for (const binding of bindings.values()) {
-		if (binding.type === 'attribute') output += ` ${binding.name}="${binding.value}"`
-		else if (binding.type === 'boolean-attribute' && binding.value) output += ` ${binding.name}=""`
-	}
-
-	return output + (isSelfClosing ? '/>' : '>')
+	return {type: 'start-tag', tagName, selfClosing: isSelfClosing, voidElement: VOID_ELEMENTS.has(lowerTagName), bindings}
 }
 
 /**
- * @param {Map<string, Binding>} bindings
- * @param {string} name
- * @param {string | null} rawValue
+ * @param {CompiledTemplate} compiled
  * @param {readonly InterpolationValue[]} values
+ * @returns {string}
  */
-function applyAttributeBinding(bindings, name, rawValue, values) {
-	const spreadMatch = name.match(SPREAD_SITE_REGEXP)
-	if (spreadMatch) {
-		applySpreadBindings(bindings, values[Number(spreadMatch[1])])
-		return
-	}
+function serializeCompiledTemplate(compiled, values) {
+	let output = ''
 
-	if (name.startsWith('?') || name.startsWith('!?')) {
-		const attributeName = name.slice(name[1] === '?' ? 2 : 1)
-		let value = false
-		if (rawValue != null) {
-			const parts = parseInterpolationParts(rawValue)
-			if (parts.length === 3 && parts[0] === '' && parts[2] === '' && typeof parts[1] === 'number')
-				value = !!unwrapForce(values[parts[1]])
-			else if (parts.length === 1 && typeof parts[0] === 'string') value = parts[0].trim() !== ''
-			else value = true
+	for (const op of compiled.ops) {
+		if (op.type === 'static') output += op.value
+		else if (op.type === 'text') {
+			for (const part of op.parts) output += typeof part === 'number' ? serializeChildValue(values[part]) : part
+		} else {
+			/** @type {Map<string, Binding>} */
+			const bindings = new Map()
+			for (const binding of op.bindings) {
+				if (binding.type === 'spread') {
+					applySpreadBindings(bindings, values[binding.index])
+					continue
+				}
+
+				if (binding.type === 'boolean-attribute') {
+					let value = false
+					if (binding.parts) {
+						if (
+							binding.parts.length === 3 &&
+							binding.parts[0] === '' &&
+							binding.parts[2] === '' &&
+							typeof binding.parts[1] === 'number'
+						)
+							value = !!unwrapForce(values[binding.parts[1]])
+						else if (binding.parts.length === 1 && typeof binding.parts[0] === 'string')
+							value = binding.parts[0].trim() !== ''
+						else value = true
+					}
+					bindings.set(`?${binding.name}`, {type: binding.type, name: binding.name, value})
+					continue
+				}
+
+				let value = ''
+				for (const part of binding.parts) {
+					if (typeof part === 'number') value += escapeHtml(resolveAttributeInput(values[part]), true)
+					else value += part.replaceAll('"', '&quot;')
+				}
+				bindings.set(binding.name, {type: binding.type, name: binding.name, value})
+			}
+
+			output += `<${op.tagName}`
+			for (const binding of bindings.values()) {
+				if (binding.type === 'attribute') output += ` ${binding.name}="${binding.value}"`
+				else if (binding.type === 'boolean-attribute' && binding.value) output += ` ${binding.name}=""`
+			}
+			output += op.selfClosing ? '/>' : '>'
 		}
-		bindings.set(`?${attributeName}`, {
-			type: 'boolean-attribute',
-			name: attributeName,
-			value,
-		})
-		return
 	}
 
-	if (name.startsWith('.') || name.startsWith('!.') || name.startsWith('@') || name.startsWith('!@')) {
-		const prefixLength = name[0] === '!' ? 2 : 1
-		const type = name[prefixLength - 1] === '.' ? 'property' : 'event'
-		bindings.set(name, {type, name: name.slice(prefixLength), value: null})
-		return
-	}
-
-	const attributeName = name.startsWith('!') ? name.slice(1) : name
-	bindings.set(attributeName, {
-		type: 'attribute',
-		name: attributeName,
-		value: rawValue == null ? '' : resolveAttributeValue(rawValue, values),
-	})
+	return output
 }
 
 /**
@@ -425,22 +471,6 @@ function applySpreadBindings(bindings, spreadValue) {
 }
 
 /**
- * @param {string} rawValue
- * @param {readonly InterpolationValue[]} values
- * @returns {string}
- */
-function resolveAttributeValue(rawValue, values) {
-	let value = ''
-
-	for (const part of parseInterpolationParts(rawValue)) {
-		if (typeof part === 'number') value += escapeHtml(resolveAttributeInput(values[part]), true)
-		else value += part.replaceAll('"', '&quot;')
-	}
-
-	return value
-}
-
-/**
  * @param {InterpolationValue} value
  * @returns {string}
  */
@@ -456,31 +486,11 @@ function resolveAttributeInput(value) {
 }
 
 /**
- * @param {string} fragment
- * @param {readonly InterpolationValue[]} values
- * @param {boolean} isTopLevel
- * @returns {string}
- */
-function serializeTextFragment(fragment, values, isTopLevel) {
-	const parts = parseInterpolationParts(fragment)
-	const filteredParts = isTopLevel
-		? parts.filter(part => typeof part === 'number' || (typeof part === 'string' && part.trim() !== ''))
-		: parts
-	let output = ''
-
-	for (const part of filteredParts) {
-		if (typeof part === 'number') output += serializeChildValue(values[part])
-		else output += part
-	}
-
-	return output
-}
-
-/**
  * @param {string} value
  * @returns {(string | number)[]}
  */
 function parseInterpolationParts(value) {
+	if (!value.includes(INTERPOLATION_MARKER)) return [value]
 	return value.split(INTERPOLATION_PARTS_REGEXP).map((part, index) => (index % 2 === 1 ? Number(part) : part))
 }
 
