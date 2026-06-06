@@ -63,7 +63,14 @@ function formatHost(cwd) {
 
 function formatAnalyzerDiagnostic(diagnostic, cwd) {
 	const {line, character} = diagnostic.file.getLineAndCharacterOfPosition(diagnostic.start || 0)
-	return `${path.relative(cwd, diagnostic.file.fileName)}:${line + 1}:${character + 1} - error TS${diagnostic.code}: ${diagnostic.messageText}\n`
+	const suffix = diagnostic.ruleId ? ` (${diagnostic.ruleId})` : ''
+	const message =
+		diagnostic.ruleId && String(diagnostic.messageText).endsWith(suffix)
+			? String(diagnostic.messageText).slice(0, -suffix.length)
+			: diagnostic.messageText
+	return `${path.relative(cwd, diagnostic.file.fileName)}:${line + 1}:${character + 1} - error ${
+		diagnostic.ruleId || `TS${diagnostic.code}`
+	}: ${message}\n`
 }
 
 module.exports = {run}

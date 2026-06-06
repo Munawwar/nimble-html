@@ -8,6 +8,20 @@ const DIAGNOSTIC_CODES = {
 	eventParameter: 91005,
 	spreadValue: 91006,
 	spreadEntryValue: 91007,
+	missingClosingTag: 92001,
+	mismatchedClosingTag: 92002,
+	implicitOptionalEndTag: 92003,
+	invalidNesting: 92004,
+	implicitTbody: 92005,
+	invalidTableStructure: 92006,
+}
+const STRUCTURAL_RULES = {
+	missingClosingTag: 'nimble-html/missing-closing-tag',
+	mismatchedClosingTag: 'nimble-html/mismatched-closing-tag',
+	implicitOptionalEndTag: 'nimble-html/implicit-optional-end-tag',
+	invalidNesting: 'nimble-html/invalid-nesting',
+	implicitTbody: 'nimble-html/implicit-tbody',
+	invalidTableStructure: 'nimble-html/invalid-table-structure',
 }
 
 const VOID_HTML_TAGS = new Set([
@@ -25,6 +39,77 @@ const VOID_HTML_TAGS = new Set([
 	'source',
 	'track',
 	'wbr',
+])
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'textarea', 'title', 'template'])
+const PHRASING_ONLY_TAGS = new Set([
+	'a',
+	'abbr',
+	'b',
+	'bdi',
+	'bdo',
+	'cite',
+	'code',
+	'data',
+	'dfn',
+	'em',
+	'i',
+	'kbd',
+	'label',
+	'mark',
+	'q',
+	'rp',
+	'rt',
+	'ruby',
+	's',
+	'samp',
+	'small',
+	'span',
+	'strong',
+	'sub',
+	'sup',
+	'time',
+	'u',
+	'var',
+])
+const NON_PHRASING_CHILD_TAGS = new Set([
+	'address',
+	'article',
+	'aside',
+	'blockquote',
+	'details',
+	'div',
+	'dl',
+	'fieldset',
+	'figcaption',
+	'figure',
+	'footer',
+	'form',
+	'h1',
+	'h2',
+	'h3',
+	'h4',
+	'h5',
+	'h6',
+	'header',
+	'hgroup',
+	'hr',
+	'main',
+	'menu',
+	'nav',
+	'ol',
+	'p',
+	'pre',
+	'search',
+	'section',
+	'table',
+	'ul',
+])
+const OPTIONAL_END_TAG_OPEN_RULES = new Map([
+	['li', new Set(['li'])],
+	['tr', new Set(['tr'])],
+	['td', new Set(['td', 'th'])],
+	['th', new Set(['td', 'th'])],
+	['p', NON_PHRASING_CHILD_TAGS],
 ])
 
 function createAnalyzer(ts, program, sourceFile) {
@@ -97,7 +182,7 @@ function createAnalyzer(ts, program, sourceFile) {
 		return parentNamespace
 	}
 
-	function scanTemplate(strings, mode) {
+	function scanTemplate(segments, mode) {
 		const stack = []
 		const state = {
 			mode: 'text',
@@ -108,23 +193,102 @@ function createAnalyzer(ts, program, sourceFile) {
 			pendingSpread: false,
 			closingTag: '',
 			selfClosing: false,
+			rawTextTag: '',
 		}
 		const holes = []
+		const diagnostics = []
 
-		function finalizeTag() {
+		function pushStructuralDiagnostic(start, length, code, ruleId, message) {
+			diagnostics.push({start, length, code, ruleId, message})
+		}
+
+		function closeCurrentTag() {
+			const current = stack[stack.length - 1]
+			if (!current) return
+			stack.pop()
+			state.mode = 'text'
+			state.rawTextTag = ''
+		}
+
+		function finalizeTag(tagStart, tagEnd) {
 			if (!state.currentTag) {
 				state.mode = 'text'
 				state.selfClosing = false
 				return
 			}
+			const lowerTagName = state.currentTag.toLowerCase()
 			const currentNamespace = stack.length ? stack[stack.length - 1].namespace : mode
 			state.currentTagNamespace = resolveNamespace(currentNamespace, state.currentTag)
+			const parent = stack[stack.length - 1]
+			const parentTag = parent?.tag.toLowerCase() || ''
+			if (state.currentTagNamespace === 'html') {
+				const impliedCloseChildren = OPTIONAL_END_TAG_OPEN_RULES.get(parentTag)
+				if (impliedCloseChildren?.has(lowerTagName))
+					pushStructuralDiagnostic(
+						tagStart,
+						tagEnd - tagStart + 1,
+						DIAGNOSTIC_CODES.implicitOptionalEndTag,
+						STRUCTURAL_RULES.implicitOptionalEndTag,
+						`Opening <${state.currentTag}> relies on an implicit closing tag for <${parent.tag}>.`,
+					)
+				if (
+					parent &&
+					parent.namespace === 'html' &&
+					PHRASING_ONLY_TAGS.has(parentTag) &&
+					NON_PHRASING_CHILD_TAGS.has(lowerTagName)
+				)
+					pushStructuralDiagnostic(
+						tagStart,
+						tagEnd - tagStart + 1,
+						DIAGNOSTIC_CODES.invalidNesting,
+						STRUCTURAL_RULES.invalidNesting,
+						`<${state.currentTag}> is not allowed inside <${parent.tag}>; browser parsing will change the DOM tree.`,
+					)
+				if (lowerTagName === 'a' && stack.some(entry => entry.namespace === 'html' && entry.tag.toLowerCase() === 'a'))
+					pushStructuralDiagnostic(
+						tagStart,
+						tagEnd - tagStart + 1,
+						DIAGNOSTIC_CODES.invalidNesting,
+						STRUCTURAL_RULES.invalidNesting,
+						'Nested <a> elements are not allowed; browser parsing will change the DOM tree.',
+					)
+				if (lowerTagName === 'tr' && parentTag === 'table')
+					pushStructuralDiagnostic(
+						tagStart,
+						tagEnd - tagStart + 1,
+						DIAGNOSTIC_CODES.implicitTbody,
+						STRUCTURAL_RULES.implicitTbody,
+						'<tr> cannot appear directly under <table>; write an explicit <tbody>.',
+					)
+				if ((lowerTagName === 'td' || lowerTagName === 'th') && parentTag !== 'tr')
+					pushStructuralDiagnostic(
+						tagStart,
+						tagEnd - tagStart + 1,
+						DIAGNOSTIC_CODES.invalidTableStructure,
+						STRUCTURAL_RULES.invalidTableStructure,
+						`<${state.currentTag}> must appear inside <tr>.`,
+					)
+				if (lowerTagName === 'tr' && parentTag && !['table', 'thead', 'tbody', 'tfoot'].includes(parentTag))
+					pushStructuralDiagnostic(
+						tagStart,
+						tagEnd - tagStart + 1,
+						DIAGNOSTIC_CODES.invalidTableStructure,
+						STRUCTURAL_RULES.invalidTableStructure,
+						'<tr> must appear inside <thead>, <tbody>, or <tfoot>.',
+					)
+			}
 			if (
 				!state.selfClosing &&
-				!(state.currentTagNamespace === 'html' && VOID_HTML_TAGS.has(state.currentTag.toLowerCase()))
+				!(state.currentTagNamespace === 'html' && VOID_HTML_TAGS.has(lowerTagName))
 			)
-				stack.push({tag: state.currentTag, namespace: state.currentTagNamespace})
-			state.mode = 'text'
+				stack.push({
+					tag: state.currentTag,
+					namespace: state.currentTagNamespace,
+					start: tagStart,
+					length: tagEnd - tagStart + 1,
+				})
+			state.mode = RAW_TEXT_TAGS.has(lowerTagName) && !state.selfClosing ? 'rawText' : 'text'
+			state.rawTextTag = state.mode === 'rawText' ? lowerTagName : ''
 			state.quote = ''
 			state.currentAttr = ''
 			state.currentTag = ''
@@ -132,31 +296,90 @@ function createAnalyzer(ts, program, sourceFile) {
 			state.pendingSpread = false
 		}
 
-		function finalizeClosingTag() {
+		function finalizeClosingTag(tagStart) {
 			const lowered = state.closingTag.toLowerCase()
-			for (let index = stack.length - 1; index >= 0; index--) {
-				if (stack[index].tag.toLowerCase() === lowered) {
-					stack.length = index
-					break
+			const current = stack[stack.length - 1]
+			if (!current)
+				pushStructuralDiagnostic(
+					tagStart,
+					state.closingTag.length + 3,
+					DIAGNOSTIC_CODES.mismatchedClosingTag,
+					STRUCTURAL_RULES.mismatchedClosingTag,
+					`Closing </${state.closingTag}> does not match any open tag.`,
+				)
+			else if (current.tag.toLowerCase() === lowered) closeCurrentTag()
+			else {
+				pushStructuralDiagnostic(
+					tagStart,
+					state.closingTag.length + 3,
+					DIAGNOSTIC_CODES.mismatchedClosingTag,
+					STRUCTURAL_RULES.mismatchedClosingTag,
+					`Closing </${state.closingTag}> does not match currently open <${current.tag}>.`,
+				)
+				const matchIndex = stack.findLastIndex(entry => entry.tag.toLowerCase() === lowered)
+				if (matchIndex >= 0) {
+					stack.length = matchIndex + 1
+					closeCurrentTag()
 				}
 			}
 			state.mode = 'text'
 			state.closingTag = ''
+			state.rawTextTag = ''
 		}
 
-		for (let segmentIndex = 0; segmentIndex < strings.length; segmentIndex++) {
-			const segment = strings[segmentIndex]
+		for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
+			const {text: segment, start: segmentStart} = segments[segmentIndex]
+			let tagStart = -1
 
 			for (let index = 0; index < segment.length; index++) {
 				const char = segment[index]
 
+				if (state.mode === 'comment') {
+					if (segment.startsWith('-->', index)) {
+						state.mode = 'text'
+						index += 2
+					}
+					continue
+				}
+
+				if (state.mode === 'cdata') {
+					if (segment.startsWith(']]>', index)) {
+						state.mode = 'text'
+						index += 2
+					}
+					continue
+				}
+
+				if (state.mode === 'rawText') {
+					const closeTag = `</${state.rawTextTag}`
+					const closeTagBoundary = segment[index + closeTag.length]
+					if (
+						char === '<' &&
+						segment.slice(index, index + closeTag.length).toLowerCase() === closeTag &&
+						(closeTagBoundary === '>' || /\s/.test(closeTagBoundary || ''))
+					) {
+						tagStart = segmentStart + index
+						state.mode = 'closingTag'
+						state.closingTag = ''
+						index++
+					}
+					continue
+				}
+
 				if (state.mode === 'text') {
-					if (char === '<') {
+					if (segment.startsWith('<!--', index)) {
+						state.mode = 'comment'
+						index += 3
+					} else if (segment.startsWith('<![CDATA[', index)) {
+						state.mode = 'cdata'
+						index += 8
+					} else if (char === '<') {
 						state.quote = ''
 						state.currentAttr = ''
 						state.currentTag = ''
 						state.pendingSpread = false
 						state.selfClosing = false
+						tagStart = segmentStart + index
 						if (segment[index + 1] === '/') {
 							state.mode = 'closingTag'
 							state.closingTag = ''
@@ -170,7 +393,7 @@ function createAnalyzer(ts, program, sourceFile) {
 
 				if (state.mode === 'closingTag') {
 					if (char === '>' || /\s/.test(char)) {
-						if (char === '>') finalizeClosingTag()
+						if (char === '>') finalizeClosingTag(tagStart)
 					} else {
 						state.closingTag += char
 					}
@@ -179,7 +402,7 @@ function createAnalyzer(ts, program, sourceFile) {
 
 				if (state.mode === 'tagName') {
 					if (char === '>') {
-						finalizeTag()
+						finalizeTag(tagStart, segmentStart + index)
 					} else if (char === '/') {
 						state.selfClosing = true
 					} else if (/\s/.test(char)) {
@@ -194,7 +417,7 @@ function createAnalyzer(ts, program, sourceFile) {
 
 				if (state.mode === 'beforeAttr') {
 					if (char === '>') {
-						finalizeTag()
+						finalizeTag(tagStart, segmentStart + index)
 					} else if (char === '/') {
 						state.selfClosing = true
 					} else if (/\s/.test(char)) {
@@ -214,7 +437,7 @@ function createAnalyzer(ts, program, sourceFile) {
 					if (char === '=') {
 						state.mode = 'beforeAttrValue'
 					} else if (char === '>') {
-						finalizeTag()
+						finalizeTag(tagStart, segmentStart + index)
 					} else if (char === '/') {
 						state.selfClosing = true
 						state.mode = 'beforeAttr'
@@ -230,7 +453,7 @@ function createAnalyzer(ts, program, sourceFile) {
 					if (char === '=') {
 						state.mode = 'beforeAttrValue'
 					} else if (char === '>') {
-						finalizeTag()
+						finalizeTag(tagStart, segmentStart + index)
 					} else if (char === '/') {
 						state.selfClosing = true
 						state.mode = 'beforeAttr'
@@ -247,7 +470,7 @@ function createAnalyzer(ts, program, sourceFile) {
 						state.quote = char
 						state.mode = 'attrValue'
 					} else if (char === '>') {
-						finalizeTag()
+						finalizeTag(tagStart, segmentStart + index)
 					} else {
 						state.quote = ''
 						state.mode = 'attrValue'
@@ -263,7 +486,7 @@ function createAnalyzer(ts, program, sourceFile) {
 							state.mode = 'beforeAttr'
 						}
 					} else if (char === '>') {
-						finalizeTag()
+						finalizeTag(tagStart, segmentStart + index)
 					} else if (/\s/.test(char)) {
 						state.currentAttr = ''
 						state.mode = 'beforeAttr'
@@ -271,7 +494,7 @@ function createAnalyzer(ts, program, sourceFile) {
 				}
 			}
 
-			if (segmentIndex === strings.length - 1) continue
+			if (segmentIndex === segments.length - 1) continue
 
 			if (state.pendingSpread && state.mode === 'beforeAttr') {
 				holes.push({
@@ -318,11 +541,20 @@ function createAnalyzer(ts, program, sourceFile) {
 			})
 		}
 
-		return {holes, state, stack}
+		for (const entry of stack)
+			pushStructuralDiagnostic(
+				entry.start,
+				entry.length,
+				DIAGNOSTIC_CODES.missingClosingTag,
+				STRUCTURAL_RULES.missingClosingTag,
+				`Missing closing tag for <${entry.tag}>.`,
+			)
+
+		return {holes, state, stack, diagnostics}
 	}
 
-	function parseTemplate(strings, mode) {
-		return scanTemplate(strings, mode).holes
+	function parseTemplate(segments, mode) {
+		return scanTemplate(segments, mode)
 	}
 
 	function readTemplateSegments(taggedTemplate) {
@@ -350,14 +582,12 @@ function createAnalyzer(ts, program, sourceFile) {
 			return null
 		}
 		const segments = readTemplateSegments(taggedTemplate)
+		const parsed = parseTemplate(segments, mode)
 		const entry = {
 			node: taggedTemplate,
 			mode,
 			segments,
-			holes: parseTemplate(
-				segments.map(segment => segment.text),
-				mode,
-			),
+			...parsed,
 			expressions: ts.isNoSubstitutionTemplateLiteral(taggedTemplate.template)
 				? []
 				: taggedTemplate.template.templateSpans.map(span => span.expression),
@@ -636,6 +866,18 @@ function createAnalyzer(ts, program, sourceFile) {
 			})
 		}
 
+		function pushStructuralDiagnostic(diagnostic) {
+			diagnostics.push({
+				file: sourceFile,
+				start: diagnostic.start,
+				length: diagnostic.length,
+				category: ts.DiagnosticCategory.Error,
+				code: diagnostic.code,
+				messageText: `${diagnostic.message} (${diagnostic.ruleId})`,
+				ruleId: diagnostic.ruleId,
+			})
+		}
+
 		function analyzeBindingExpression(hole, expression, codePrefix) {
 			const {unwrapped} = unwrapForceExpression(expression)
 			const expectation = getBindingExpectation(hole)
@@ -671,7 +913,8 @@ function createAnalyzer(ts, program, sourceFile) {
 			)
 		}
 
-		for (const {holes, expressions} of getTemplateEntries()) {
+		for (const {diagnostics: templateDiagnostics, holes, expressions} of getTemplateEntries()) {
+			for (const diagnostic of templateDiagnostics) pushStructuralDiagnostic(diagnostic)
 			for (let index = 0; index < holes.length; index++) {
 				const hole = holes[index]
 				const expression = expressions[index]
@@ -790,7 +1033,7 @@ function createAnalyzer(ts, program, sourceFile) {
 			const segmentEnd = segment.start + segment.text.length
 			if (position < segment.start || position > segmentEnd) continue
 			const priorText = segment.text.slice(0, position - segment.start)
-			const {state} = scanTemplate([priorText], mode)
+			const {state} = scanTemplate([{text: priorText, start: 0}], mode)
 			if (!state.currentTag || !['beforeAttr', 'attrName', 'afterAttrName'].includes(state.mode)) return completion
 			const match = priorText.match(/(?:^|[\s<>"'=\/])(!?[.?@]?[A-Za-z0-9:_-]*)$/)
 			if (!match) return completion
