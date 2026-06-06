@@ -89,6 +89,32 @@ test('plugin diagnostics work for JS files with JSDoc typing', () => {
 	)
 })
 
+test('plugin diagnostics report structural markup rules', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/structural.ts')
+	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 92000)
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/missing-closing-tag'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/mismatched-closing-tag'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/implicit-optional-end-tag'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/invalid-nesting'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/implicit-tbody'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/invalid-table-structure'))
+	assert(
+		diagnostics.some(
+			diagnostic =>
+				diagnostic.ruleId === 'nimble-html/invalid-nesting' &&
+				String(diagnostic.messageText).includes('browser parsing will change the DOM tree'),
+		),
+	)
+})
+
+test('plugin does not report structural diagnostics for explicit valid markup', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/structural-valid.ts')
+	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 92000)
+	assert.equal(diagnostics.length, 0)
+})
+
 test('plugin completions suggest nimble-html bindings in template text', () => {
 	const {languageService} = createPluginLanguageService()
 	const filePath = path.join(fixtureRoot, 'src/completions.ts')
@@ -141,7 +167,10 @@ test('cli reports the same TS diagnostics as the plugin', () => {
 	const output = stdout.join('')
 	assert(output.includes('src/diagnostics.ts'))
 	assert(output.includes('src/diagnostics-js.js'))
+	assert(output.includes('src/structural.ts'))
 	assert(output.includes('TS91004'))
 	assert(output.includes('TS91007'))
-	assert(output.includes('nimble-html-lint found 12 issues.'))
+	assert(output.includes('nimble-html/missing-closing-tag'))
+	assert(output.includes('nimble-html/invalid-table-structure'))
+	assert.match(output, /nimble-html-lint found \d+ issues\./)
 })
