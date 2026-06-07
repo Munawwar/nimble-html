@@ -712,6 +712,7 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 				;(/** @type {ChildNode} */ (node)).remove()
 				node = nextSibling
 			}
+			break
 		}
 	}
 
