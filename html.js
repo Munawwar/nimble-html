@@ -887,6 +887,7 @@ function reconcileDom(parentNode, oldNodes, newNodes, endBoundaryNode = null) {
 				removableNode.remove()
 				node = nextSibling
 			}
+			break
 		}
 	}
 
