@@ -115,6 +115,37 @@ test('plugin does not report structural diagnostics for explicit valid markup', 
 	assert.equal(diagnostics.length, 0)
 })
 
+test('plugin handles scanner state across template segment boundaries', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/structural-boundaries.ts')
+	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 92000)
+	assert.equal(diagnostics.length, 0)
+})
+
+test('plugin reports additional optional-end-tag and mismatched-close cases', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/structural-advanced.ts')
+	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 92000)
+	assert(diagnostics.filter(diagnostic => diagnostic.ruleId === 'nimble-html/implicit-optional-end-tag').length >= 3)
+	assert(diagnostics.filter(diagnostic => diagnostic.ruleId === 'nimble-html/mismatched-closing-tag').length >= 2)
+})
+
+test('plugin handles force shadowing and spread extraction edge cases', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/diagnostics-advanced.ts')
+	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 91000)
+	assert.deepEqual(
+		diagnostics.map(diagnostic => diagnostic.code),
+		[91001, 91007],
+	)
+	assert(
+		diagnostics.some(
+			diagnostic =>
+				diagnostic.code === 91001 && String(diagnostic.messageText).includes('value on <input> expects string'),
+		),
+	)
+})
+
 test('plugin completions suggest nimble-html bindings in template text', () => {
 	const {languageService} = createPluginLanguageService()
 	const filePath = path.join(fixtureRoot, 'src/completions.ts')
@@ -144,6 +175,35 @@ test('plugin completions suggest nimble-html bindings in template text', () => {
 	assert(spreadCompletions?.entries.some(entry => entry.name === '?hidden' && entry.insertText === "'?hidden'"))
 	assert(spreadCompletions?.entries.some(entry => entry.name === '.value' && entry.insertText === "'.value'"))
 	assert(spreadCompletions?.entries.some(entry => entry.name === '@click' && entry.insertText === "'@click'"))
+})
+
+test('plugin completions include force, aria/data, and svg foreignObject namespace cases', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/completions-advanced.ts')
+	const forceCompletions = languageService.getCompletionsAtPosition(
+		filePath,
+		getPosition(filePath, '<input ! />', 8),
+		{},
+	)
+	const dataCompletions = languageService.getCompletionsAtPosition(
+		filePath,
+		getPosition(filePath, '<input da />', 9),
+		{},
+	)
+	const ariaCompletions = languageService.getCompletionsAtPosition(
+		filePath,
+		getPosition(filePath, '<input ar />', 9),
+		{},
+	)
+	const foreignObjectCompletions = languageService.getCompletionsAtPosition(
+		filePath,
+		getPosition(filePath, '<foreignObject><input . /></foreignObject>', 23),
+		{},
+	)
+	assert(forceCompletions?.entries.some(entry => entry.name === '!value'))
+	assert(dataCompletions?.entries.some(entry => entry.name === 'data-'))
+	assert(ariaCompletions?.entries.some(entry => entry.name === 'aria-'))
+	assert(foreignObjectCompletions?.entries.some(entry => entry.name === '.value'))
 })
 
 test('cli reports the same TS diagnostics as the plugin', () => {
