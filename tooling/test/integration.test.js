@@ -130,6 +130,25 @@ test('plugin reports additional optional-end-tag and mismatched-close cases', ()
 	assert(diagnostics.filter(diagnostic => diagnostic.ruleId === 'nimble-html/mismatched-closing-tag').length >= 2)
 })
 
+test('plugin reports delegated html-validate structural rules with source positions', () => {
+	const {languageService} = createPluginLanguageService()
+	const filePath = path.join(fixtureRoot, 'src/structural-html-validate.ts')
+	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 92000)
+	const ruleIds = diagnostics.map(diagnostic => diagnostic.ruleId)
+	for (const ruleId of [
+		'nimble-html/duplicate-attribute',
+		'nimble-html/void-content',
+		'nimble-html/close-tag-attribute',
+		'nimble-html/invalid-element-name',
+		'nimble-html/invalid-element-parent',
+	])
+		assert(ruleIds.includes(ruleId), `Expected ${ruleId}`)
+
+	const duplicate = diagnostics.find(diagnostic => diagnostic.ruleId === 'nimble-html/duplicate-attribute')
+	assert.equal(duplicate?.start, getPosition(filePath, 'title="y"'))
+	assert.equal(duplicate?.length, 'title'.length)
+})
+
 test('plugin handles force shadowing and spread extraction edge cases', () => {
 	const {languageService} = createPluginLanguageService()
 	const filePath = path.join(fixtureRoot, 'src/diagnostics-advanced.ts')

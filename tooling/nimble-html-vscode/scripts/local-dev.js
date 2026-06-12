@@ -12,6 +12,7 @@ const artifactDir = path.join(rootDir, '.artifacts')
 const vsixPath = path.join(artifactDir, 'nimble-html-vscode.vsix')
 const fixtureDir = path.join(rootDir, 'tooling', 'test-fixtures', 'fixture-project')
 const nodeModulesDir = path.join(extensionDir, 'node_modules')
+const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const candidates =
 	process.platform === 'win32' ? ['code.cmd', 'code-insiders.cmd', 'codium.cmd'] : ['code', 'code-insiders', 'codium']
 
@@ -39,6 +40,9 @@ if (mode === 'prepare' || mode === 'package' || mode === 'install') {
 			filter: sourcePath => !sourcePath.includes(`${path.sep}node_modules${path.sep}`),
 		})
 	}
+	run(npm, ['ci', '--omit=dev', '--ignore-scripts'], {
+		cwd: path.join(nodeModulesDir, 'nimble-html-template-analyzer'),
+	})
 }
 
 if (mode === 'package' || mode === 'install') {

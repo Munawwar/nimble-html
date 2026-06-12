@@ -1,5 +1,23 @@
 // @ts-nocheck
 
+/**
+ * @typedef {'html' | 'svg' | 'mathml'} Namespace
+ * @typedef {import('typescript').Node} TsNode
+ * @typedef {import('typescript').Expression} TsExpression
+ * @typedef {import('typescript').Type} TsType
+ * @typedef {{kind: string, tagName?: string, namespace: Namespace, name?: string}} Hole
+ * @typedef {{kind: string, label: string, type?: TsType, eventType?: TsType | null}} BindingExpectation
+ * @typedef {{node: TsNode, code: number, message: string}} PendingDiagnostic
+ * @typedef {{start: number, length: number, code: number, ruleId: string, message: string}} StructuralDiagnostic
+ * @typedef {{properties: string[], attributes: string[], booleans: string[], events: string[]}} CompletionSet
+ * @typedef {{name: string, insertText: string, kind: string, sortText: string}} CompletionEntry
+ * @typedef {{entries: CompletionEntry[], replacementSpan: {start: number, length: number}}} CompletionResult
+ */
+
+/**
+ * Create diagnostic and completion APIs from the shared analyzer context.
+ * @param {object} context
+ */
 function createDiagnostics(context) {
 	const {ts, checker, sourceFile, caches, constants} = context
 	const {DIAGNOSTIC_CODES, DEFAULT_ATTRIBUTE_COMPLETIONS, DEFAULT_BOOLEAN_COMPLETIONS, DEFAULT_EVENT_COMPLETIONS} =
@@ -7,6 +25,11 @@ function createDiagnostics(context) {
 	const {getGlobalType, resolveElementType, unwrapForceExpression, resolveSpreadEntries} = context.types
 	const {getTemplateEntries, getContainingTemplateEntry, scanTemplate} = context.discovery
 
+	/**
+	 * Determine the expected value shape for one template expression hole.
+	 * @param {Hole} hole
+	 * @returns {BindingExpectation}
+	 */
 	function getBindingExpectation(hole) {
 		if (hole.kind === 'text') return {kind: 'text', label: 'child value'}
 		if (hole.kind === 'spread') return {kind: 'spread', label: 'object, false, null, or undefined'}
@@ -66,6 +89,12 @@ function createDiagnostics(context) {
 		return {kind: 'attribute-primitive', label: hole.name}
 	}
 
+	/**
+	 * Check assignability for non-event, non-spread binding expectations.
+	 * @param {TsType} actualType
+	 * @param {BindingExpectation} expectation
+	 * @returns {string | null}
+	 */
 	function checkSimpleKind(actualType, expectation) {
 		const typeString = checker.typeToString(actualType)
 		if (actualType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) return null
@@ -99,6 +128,10 @@ function createDiagnostics(context) {
 		return null
 	}
 
+	/**
+	 * Check if a spread expression type can be applied as a props object.
+	 * @param {TsType} actualType
+	 */
 	function isSpreadValueAllowed(actualType) {
 		if (actualType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) return true
 		if (actualType.isUnion()) return actualType.types.every(isSpreadValueAllowed)
@@ -110,6 +143,12 @@ function createDiagnostics(context) {
 		return !symbol || String(symbol.getName()) !== 'Node'
 	}
 
+	/**
+	 * Validate event binding values and typed handler parameters.
+	 * @param {TsExpression} expression
+	 * @param {BindingExpectation} expectation
+	 * @returns {PendingDiagnostic[]}
+	 */
 	function analyzeEventExpression(expression, expectation) {
 		const actualType = checker.getTypeAtLocation(expression)
 		if (actualType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) return []
@@ -167,10 +206,20 @@ function createDiagnostics(context) {
 				]
 	}
 
+	/**
+	 * Build and cache all structural and TypeScript type diagnostics.
+	 * @returns {import('typescript').Diagnostic[]}
+	 */
 	function buildDiagnostics() {
 		if (context.cachedDiagnostics) return context.cachedDiagnostics
 		const diagnostics = []
 
+		/**
+		 * Add a TypeScript-node-based diagnostic.
+		 * @param {TsNode} node
+		 * @param {number} code
+		 * @param {string} message
+		 */
 		function pushDiagnostic(node, code, message) {
 			diagnostics.push({
 				file: sourceFile,
@@ -182,6 +231,10 @@ function createDiagnostics(context) {
 			})
 		}
 
+		/**
+		 * Add a structural diagnostic that already uses source offsets.
+		 * @param {StructuralDiagnostic} diagnostic
+		 */
 		function pushStructuralDiagnostic(diagnostic) {
 			diagnostics.push({
 				file: sourceFile,
@@ -194,6 +247,12 @@ function createDiagnostics(context) {
 			})
 		}
 
+		/**
+		 * Type-check one direct binding or one statically-known spread entry.
+		 * @param {Hole} hole
+		 * @param {TsExpression} expression
+		 * @param {'direct' | 'spread'} codePrefix
+		 */
 		function analyzeBindingExpression(hole, expression, codePrefix) {
 			const {unwrapped} = unwrapForceExpression(expression)
 			const expectation = getBindingExpectation(hole)
@@ -266,9 +325,20 @@ function createDiagnostics(context) {
 		return diagnostics
 	}
 
+	/**
+	 * Return attribute/property/event completions for a template source position.
+	 * @param {number} position
+	 * @returns {CompletionResult | null}
+	 */
 	function getTemplateCompletions(position) {
 		let completion = null
 
+		/**
+		 * Build or fetch the completion sets for a namespace/tag pair.
+		 * @param {Namespace} namespace
+		 * @param {string} tagName
+		 * @returns {CompletionSet}
+		 */
 		function getCompletionSet(namespace, tagName) {
 			const cacheKey = `${namespace}:${tagName}`
 			let completionSet = caches.completionSets.get(cacheKey)
@@ -302,6 +372,15 @@ function createDiagnostics(context) {
 			return completionSet
 		}
 
+		/**
+		 * Convert cached completion names into TypeScript completion entries.
+		 * @param {Namespace} namespace
+		 * @param {string} tagName
+		 * @param {string} partial
+		 * @param {string} forcePrefix
+		 * @param {boolean} quoted
+		 * @returns {CompletionEntry[]}
+		 */
 		function buildEntries(namespace, tagName, partial, forcePrefix, quoted) {
 			const completionSet = getCompletionSet(namespace, tagName)
 			const entries = []

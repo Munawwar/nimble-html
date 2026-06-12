@@ -1,5 +1,8 @@
 import {html} from '../../../../html.js'
 
+const handler = () => {}
+const value = 1
+
 html`<div>
 	<!-- note --><![CDATA[ok]]>
 	<script>
@@ -19,3 +22,4 @@ html`<table>
 	</tbody>
 </table>`
 html`<em><span>text</span></em>`
+html`<button @someevent=${handler} @someEvent=${handler} .someprop=${value} .someProp=${value}></button>`

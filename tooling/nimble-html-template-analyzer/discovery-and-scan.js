@@ -1,5 +1,27 @@
 // @ts-nocheck
 
+/**
+ * @typedef {'html' | 'svg' | 'mathml'} Namespace
+ * @typedef {import('typescript').Expression} TsExpression
+ * @typedef {import('typescript').TaggedTemplateExpression} TaggedTemplateExpression
+ * @typedef {{text: string, start: number}} TemplateSegment
+ * @typedef {{tag: string, namespace: Namespace, start: number, length: number}} StackEntry
+ * @typedef {{index: number, tagName: string, namespace: Namespace}} BaseHole
+ * @typedef {BaseHole & {kind: 'spread', prefix: '...'}} SpreadHole
+ * @typedef {BaseHole & {kind: 'attribute' | 'property' | 'boolean-attribute' | 'event', rawName: string, name: string, forced: boolean, quoted: boolean}} BindingHole
+ * @typedef {BaseHole & {kind: 'text'}} TextHole
+ * @typedef {SpreadHole | BindingHole | TextHole} Hole
+ * @typedef {{mode: string, quote: string, currentTag: string, currentTagNamespace: Namespace, currentAttr: string, pendingSpread: boolean, closingTag: string, selfClosing: boolean, rawTextTag: string}} ScannerState
+ * @typedef {{holes: Hole[], state: ScannerState, stack: StackEntry[]}} ScanResult
+ * @typedef {{node: TaggedTemplateExpression, mode: Namespace, segments: TemplateSegment[], holes: Hole[], state: ScannerState, stack: StackEntry[], diagnostics: import('./structural-validation.js').StructuralDiagnostic[], expressions: TsExpression[]}} TemplateEntry
+ */
+
+/**
+ * Determine the child namespace after opening an HTML/SVG/MathML tag.
+ * @param {Namespace} parentNamespace
+ * @param {string} tagName
+ * @returns {Namespace}
+ */
 function resolveNamespace(parentNamespace, tagName) {
 	if (parentNamespace === 'html' && tagName.toLowerCase() === 'svg') return 'svg'
 	if (parentNamespace === 'html' && tagName.toLowerCase() === 'math') return 'mathml'
@@ -7,13 +29,21 @@ function resolveNamespace(parentNamespace, tagName) {
 	return parentNamespace
 }
 
+/**
+ * Create helpers that discover nimble tagged templates and scan template text.
+ * @param {object} context
+ */
 function createDiscoveryAndScan(context) {
 	const {ts, sourceFile, caches, constants} = context
-	const {DIAGNOSTIC_CODES, STRUCTURAL_RULES} = constants
-	const {VOID_HTML_TAGS, RAW_TEXT_TAGS, PHRASING_ONLY_TAGS, NON_PHRASING_CHILD_TAGS} = constants
-	const {OPTIONAL_END_TAG_OPEN_RULES, NIMBLE_TAG_MODES} = constants
+	const {VOID_HTML_TAGS, RAW_TEXT_TAGS, NIMBLE_TAG_MODES} = constants
 	const {getResolvedSymbol, isNimbleDeclaration} = context.types
+	const {getStructuralDiagnostics} = context.structural
 
+	/**
+	 * Return html/svg/mathml only for real nimble-html tag functions.
+	 * @param {TaggedTemplateExpression} taggedTemplate
+	 * @returns {Namespace | null}
+	 */
 	function getNimbleTagMode(taggedTemplate) {
 		const tagNode =
 			ts.isPropertyAccessExpression(taggedTemplate.tag) || ts.isIdentifier(taggedTemplate.tag)
@@ -27,6 +57,11 @@ function createDiscoveryAndScan(context) {
 		return null
 	}
 
+	/**
+	 * Read literal template pieces with their absolute source offsets.
+	 * @param {TaggedTemplateExpression} taggedTemplate
+	 * @returns {TemplateSegment[]}
+	 */
 	function readTemplateSegments(taggedTemplate) {
 		if (ts.isNoSubstitutionTemplateLiteral(taggedTemplate.template)) {
 			const text = taggedTemplate.template.getText(sourceFile)
@@ -44,6 +79,12 @@ function createDiscoveryAndScan(context) {
 		return segments
 	}
 
+	/**
+	 * Scan literal segments to classify expression holes and maintain tag stack.
+	 * @param {TemplateSegment[]} segments
+	 * @param {Namespace} mode
+	 * @returns {ScanResult}
+	 */
 	function scanTemplate(segments, mode) {
 		const stack = []
 		const state = {
@@ -58,12 +99,10 @@ function createDiscoveryAndScan(context) {
 			rawTextTag: '',
 		}
 		const holes = []
-		const diagnostics = []
 
-		function pushStructuralDiagnostic(start, length, code, ruleId, message) {
-			diagnostics.push({start, length, code, ruleId, message})
-		}
-
+		/**
+		 * Pop the current open tag from the local scanner stack.
+		 */
 		function closeCurrentTag() {
 			const current = stack[stack.length - 1]
 			if (!current) return
@@ -72,6 +111,11 @@ function createDiscoveryAndScan(context) {
 			state.rawTextTag = ''
 		}
 
+		/**
+		 * Finish an opening tag and update namespace/raw-text/stack state.
+		 * @param {number} tagStart
+		 * @param {number} tagEnd
+		 */
 		function finalizeTag(tagStart, tagEnd) {
 			if (!state.currentTag) {
 				state.mode = 'text'
@@ -81,64 +125,6 @@ function createDiscoveryAndScan(context) {
 			const lowerTagName = state.currentTag.toLowerCase()
 			const currentNamespace = stack.length ? stack[stack.length - 1].namespace : mode
 			state.currentTagNamespace = resolveNamespace(currentNamespace, state.currentTag)
-			const parent = stack[stack.length - 1]
-			const parentTag = parent?.tag.toLowerCase() || ''
-			if (state.currentTagNamespace === 'html') {
-				const impliedCloseChildren = OPTIONAL_END_TAG_OPEN_RULES.get(parentTag)
-				if (impliedCloseChildren?.has(lowerTagName))
-					pushStructuralDiagnostic(
-						tagStart,
-						tagEnd - tagStart + 1,
-						DIAGNOSTIC_CODES.implicitOptionalEndTag,
-						STRUCTURAL_RULES.implicitOptionalEndTag,
-						`Opening <${state.currentTag}> relies on an implicit closing tag for <${parent.tag}>.`,
-					)
-				if (
-					parent &&
-					parent.namespace === 'html' &&
-					PHRASING_ONLY_TAGS.has(parentTag) &&
-					NON_PHRASING_CHILD_TAGS.has(lowerTagName)
-				)
-					pushStructuralDiagnostic(
-						tagStart,
-						tagEnd - tagStart + 1,
-						DIAGNOSTIC_CODES.invalidNesting,
-						STRUCTURAL_RULES.invalidNesting,
-						`<${state.currentTag}> is not allowed inside <${parent.tag}>; browser parsing will change the DOM tree.`,
-					)
-				if (lowerTagName === 'a' && stack.some(entry => entry.namespace === 'html' && entry.tag.toLowerCase() === 'a'))
-					pushStructuralDiagnostic(
-						tagStart,
-						tagEnd - tagStart + 1,
-						DIAGNOSTIC_CODES.invalidNesting,
-						STRUCTURAL_RULES.invalidNesting,
-						'Nested <a> elements are not allowed; browser parsing will change the DOM tree.',
-					)
-				if (lowerTagName === 'tr' && parentTag === 'table')
-					pushStructuralDiagnostic(
-						tagStart,
-						tagEnd - tagStart + 1,
-						DIAGNOSTIC_CODES.implicitTbody,
-						STRUCTURAL_RULES.implicitTbody,
-						'<tr> cannot appear directly under <table>; write an explicit <tbody>.',
-					)
-				if ((lowerTagName === 'td' || lowerTagName === 'th') && parentTag !== 'tr')
-					pushStructuralDiagnostic(
-						tagStart,
-						tagEnd - tagStart + 1,
-						DIAGNOSTIC_CODES.invalidTableStructure,
-						STRUCTURAL_RULES.invalidTableStructure,
-						`<${state.currentTag}> must appear inside <tr>.`,
-					)
-				if (lowerTagName === 'tr' && parentTag && !['table', 'thead', 'tbody', 'tfoot'].includes(parentTag))
-					pushStructuralDiagnostic(
-						tagStart,
-						tagEnd - tagStart + 1,
-						DIAGNOSTIC_CODES.invalidTableStructure,
-						STRUCTURAL_RULES.invalidTableStructure,
-						'<tr> must appear inside <thead>, <tbody>, or <tfoot>.',
-					)
-			}
 			if (!state.selfClosing && !(state.currentTagNamespace === 'html' && VOID_HTML_TAGS.has(lowerTagName)))
 				stack.push({
 					tag: state.currentTag,
@@ -155,26 +141,17 @@ function createDiscoveryAndScan(context) {
 			state.pendingSpread = false
 		}
 
+		/**
+		 * Finish a closing tag and reconcile it with the local open-tag stack.
+		 * @param {number} tagStart
+		 */
 		function finalizeClosingTag(tagStart) {
 			const lowered = state.closingTag.toLowerCase()
 			const current = stack[stack.length - 1]
-			if (!current)
-				pushStructuralDiagnostic(
-					tagStart,
-					state.closingTag.length + 3,
-					DIAGNOSTIC_CODES.mismatchedClosingTag,
-					STRUCTURAL_RULES.mismatchedClosingTag,
-					`Closing </${state.closingTag}> does not match any open tag.`,
-				)
-			else if (current.tag.toLowerCase() === lowered) closeCurrentTag()
+			if (!current) {
+				// html-validate reports the diagnostic; the local stack still drives hole context.
+			} else if (current.tag.toLowerCase() === lowered) closeCurrentTag()
 			else {
-				pushStructuralDiagnostic(
-					tagStart,
-					state.closingTag.length + 3,
-					DIAGNOSTIC_CODES.mismatchedClosingTag,
-					STRUCTURAL_RULES.mismatchedClosingTag,
-					`Closing </${state.closingTag}> does not match currently open <${current.tag}>.`,
-				)
 				const matchIndex = stack.findLastIndex(entry => entry.tag.toLowerCase() === lowered)
 				if (matchIndex >= 0) {
 					stack.length = matchIndex + 1
@@ -384,6 +361,7 @@ function createDiscoveryAndScan(context) {
 					rawName,
 					name: rawName.replace(/^!?(?:[.?@])?/, ''),
 					forced: rawName.startsWith('!'),
+					quoted: !!state.quote,
 				})
 				if (state.mode === 'beforeAttrValue') {
 					state.currentAttr = ''
@@ -401,18 +379,14 @@ function createDiscoveryAndScan(context) {
 			})
 		}
 
-		for (const entry of stack)
-			pushStructuralDiagnostic(
-				entry.start,
-				entry.length,
-				DIAGNOSTIC_CODES.missingClosingTag,
-				STRUCTURAL_RULES.missingClosingTag,
-				`Missing closing tag for <${entry.tag}>.`,
-			)
-
-		return {holes, state, stack, diagnostics}
+		return {holes, state, stack}
 	}
 
+	/**
+	 * Parse one tagged template into reusable diagnostics/completion metadata.
+	 * @param {TaggedTemplateExpression} taggedTemplate
+	 * @returns {TemplateEntry | null}
+	 */
 	function getTemplateEntry(taggedTemplate) {
 		if (caches.templateEntries.has(taggedTemplate)) return caches.templateEntries.get(taggedTemplate)
 		const mode = getNimbleTagMode(taggedTemplate)
@@ -422,19 +396,25 @@ function createDiscoveryAndScan(context) {
 		}
 		const segments = readTemplateSegments(taggedTemplate)
 		const parsed = scanTemplate(segments, mode)
+		const expressions = ts.isNoSubstitutionTemplateLiteral(taggedTemplate.template)
+			? []
+			: taggedTemplate.template.templateSpans.map(span => span.expression)
 		const entry = {
 			node: taggedTemplate,
 			mode,
 			segments,
 			...parsed,
-			expressions: ts.isNoSubstitutionTemplateLiteral(taggedTemplate.template)
-				? []
-				: taggedTemplate.template.templateSpans.map(span => span.expression),
+			diagnostics: getStructuralDiagnostics(segments, expressions, parsed.holes, parsed.stack, mode),
+			expressions,
 		}
 		caches.templateEntries.set(taggedTemplate, entry)
 		return entry
 	}
 
+	/**
+	 * Discover and cache all nimble tagged templates in the source file.
+	 * @returns {TemplateEntry[]}
+	 */
 	function getTemplateEntries() {
 		if (context.cachedTemplateEntries) return context.cachedTemplateEntries
 		const entries = []
@@ -450,6 +430,11 @@ function createDiscoveryAndScan(context) {
 		return entries
 	}
 
+	/**
+	 * Find the innermost cached template that contains a source position.
+	 * @param {number} position
+	 * @returns {TemplateEntry | null}
+	 */
 	function getContainingTemplateEntry(position) {
 		if (!context.cachedTemplateRanges) {
 			context.cachedTemplateRanges = getTemplateEntries()

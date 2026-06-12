@@ -21,6 +21,7 @@
 	"scripts": {
 		"start": "five-server . --open=examples",
 		"dev": "npm start",
+		"install:all": "npm ci && npm ci --prefix tooling/nimble-html-template-analyzer",
 		"build": "tsc",
 		"build:clean": "npm run clean && npm run build",
 		"build:watch": "tsc --watch",
@@ -58,6 +59,7 @@
 		"@web/dev-server-import-maps": "^0.2.1",
 		"@web/test-runner": "^0.20.2",
 		"five-server": "^0.4.4",
+		"html-validate": "^7.18.1",
 		"prettier": "^3.6.2",
 		"rimraf": "^6.0.1",
 		"solid-js": "^1.9.9",
