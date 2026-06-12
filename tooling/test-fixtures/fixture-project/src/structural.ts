@@ -28,3 +28,24 @@ html`<table><td>cell</td></table>`
 // nimble-html/invalid-table-structure
 // prettier-ignore
 html`<div><tr><td>cell</td></tr></div>`
+
+const value = 'x'
+
+// nimble-html/duplicate-attribute
+html`<div>
+	<span title=${value} title="y"></span>
+</div>`
+
+// nimble-html/void-content
+html`<input>text</input>`
+
+// nimble-html/close-tag-attribute
+html`<div></div class="x">`
+
+// nimble-html/invalid-element-name
+html`<not></not>`
+
+// nimble-html/invalid-element-parent
+html`<body>
+	<title>x</title>
+</body>`

@@ -18,6 +18,11 @@ const DIAGNOSTIC_CODES = {
 	invalidNesting: 92004,
 	implicitTbody: 92005,
 	invalidTableStructure: 92006,
+	duplicateAttribute: 92007,
+	voidContent: 92008,
+	closeTagAttribute: 92009,
+	invalidElementName: 92010,
+	invalidElementParent: 92011,
 }
 const STRUCTURAL_RULES = {
 	missingClosingTag: 'nimble-html/missing-closing-tag',
@@ -26,6 +31,11 @@ const STRUCTURAL_RULES = {
 	invalidNesting: 'nimble-html/invalid-nesting',
 	implicitTbody: 'nimble-html/implicit-tbody',
 	invalidTableStructure: 'nimble-html/invalid-table-structure',
+	duplicateAttribute: 'nimble-html/duplicate-attribute',
+	voidContent: 'nimble-html/void-content',
+	closeTagAttribute: 'nimble-html/close-tag-attribute',
+	invalidElementName: 'nimble-html/invalid-element-name',
+	invalidElementParent: 'nimble-html/invalid-element-parent',
 }
 
 const VOID_HTML_TAGS = new Set([
@@ -60,6 +70,9 @@ const PHRASING_ONLY_TAGS = new Set([
 	'kbd',
 	'label',
 	'mark',
+	'meter',
+	'output',
+	'progress',
 	'q',
 	'rp',
 	'rt',
@@ -75,6 +88,11 @@ const PHRASING_ONLY_TAGS = new Set([
 	'u',
 	'var',
 ])
+const KNOWN_HTML_TAGS = new Set(
+	`a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label legend li link main map mark math menu meta meter nav noscript object ol optgroup option output p param picture pre progress q rp rt ruby s samp script search section select slot small source span strong style sub summary sup svg table tbody td template textarea tfoot th thead time title tr track u ul var video wbr`.split(
+		' ',
+	),
+)
 const NON_PHRASING_CHILD_TAGS = new Set([
 	'address',
 	'article',
@@ -108,6 +126,23 @@ const NON_PHRASING_CHILD_TAGS = new Set([
 	'table',
 	'ul',
 ])
+const CHILD_TAG_ALLOWLISTS = new Map(
+	Object.entries({
+		datalist: 'option script template',
+		html: 'head body',
+		head: 'base link meta noscript script style template title',
+		optgroup: 'option script template',
+		ol: 'li script template',
+		picture: 'source img script template',
+		select: 'option optgroup hr script template',
+		table: 'caption colgroup thead tbody tfoot tr script template',
+		tbody: 'tr script template',
+		tfoot: 'tr script template',
+		thead: 'tr script template',
+		tr: 'td th script template',
+		ul: 'li script template',
+	}).map(([tag, children]) => [tag, new Set(children.split(' '))]),
+)
 const OPTIONAL_END_TAG_OPEN_RULES = new Map([
 	['li', new Set(['li'])],
 	['tr', new Set(['tr'])],
@@ -122,19 +157,39 @@ const DEFAULT_EVENT_COMPLETIONS = ['click', 'input', 'change', 'submit', 'keydow
 
 const analyzerCache = new WeakMap()
 
+/**
+ * @typedef {{name: string, insertText: string, kind: string, sortText: string}} CompletionEntry
+ * @typedef {{entries: CompletionEntry[], replacementSpan: {start: number, length: number}}} CompletionResult
+ * @typedef {{buildDiagnostics(): import('typescript').Diagnostic[], getTemplateCompletions(position: number): CompletionResult | null}} Analyzer
+ */
+
+/**
+ * Build the per-source-file analyzer facade used by diagnostics and completions.
+ * @param {typeof import('typescript')} ts
+ * @param {import('typescript').Program} program
+ * @param {import('typescript').SourceFile} sourceFile
+ * @returns {Analyzer}
+ */
 function createAnalyzer(ts, program, sourceFile) {
 	const context = {
 		ts,
 		checker: program.getTypeChecker(),
 		sourceFile,
 		caches: {
+			// DOM tag-name-map property lookups, keyed as "MapName:tag".
 			tagMapTypes: new Map(),
+			// global lib.dom type lookups such as HTMLElementTagNameMap.
 			globalTypes: new Map(),
+			// completion name arrays per resolved "namespace:tag" pair.
 			completionSets: new Map(),
+			// parsed template entries per TaggedTemplateExpression node.
 			templateEntries: new WeakMap(),
 		},
+		// full semantic diagnostics for this source file analyzer instance.
 		cachedDiagnostics: null,
+		// all discovered nimble tagged templates in this source file.
 		cachedTemplateEntries: null,
+		// sorted template source ranges for completion-position lookup.
 		cachedTemplateRanges: null,
 		constants: {
 			DIAGNOSTIC_CODES,
@@ -142,7 +197,9 @@ function createAnalyzer(ts, program, sourceFile) {
 			VOID_HTML_TAGS,
 			RAW_TEXT_TAGS,
 			PHRASING_ONLY_TAGS,
+			KNOWN_HTML_TAGS,
 			NON_PHRASING_CHILD_TAGS,
+			CHILD_TAG_ALLOWLISTS,
 			OPTIONAL_END_TAG_OPEN_RULES,
 			NIMBLE_TAG_MODES,
 			DEFAULT_ATTRIBUTE_COMPLETIONS,
@@ -155,6 +212,13 @@ function createAnalyzer(ts, program, sourceFile) {
 	return createDiagnostics(context)
 }
 
+/**
+ * Return the analyzer cached for the current TypeScript Program/SourceFile pair.
+ * @param {typeof import('typescript')} ts
+ * @param {import('typescript').Program} program
+ * @param {import('typescript').SourceFile} sourceFile
+ * @returns {Analyzer}
+ */
 function getAnalyzer(ts, program, sourceFile) {
 	const cached = analyzerCache.get(sourceFile)
 	if (cached?.program === program && cached.ts === ts) return cached.analyzer
@@ -163,10 +227,25 @@ function getAnalyzer(ts, program, sourceFile) {
 	return analyzer
 }
 
+/**
+ * Entry point used by the TypeScript plugin and CLI to produce diagnostics.
+ * @param {typeof import('typescript')} ts
+ * @param {import('typescript').Program} program
+ * @param {import('typescript').SourceFile} sourceFile
+ * @returns {import('typescript').Diagnostic[]}
+ */
 function analyzeSourceFile(ts, program, sourceFile) {
 	return getAnalyzer(ts, program, sourceFile).buildDiagnostics()
 }
 
+/**
+ * Entry point used by the TypeScript plugin to produce template completions.
+ * @param {typeof import('typescript')} ts
+ * @param {import('typescript').Program} program
+ * @param {import('typescript').SourceFile} sourceFile
+ * @param {number} position
+ * @returns {CompletionResult | null}
+ */
 function getCompletionsAtPosition(ts, program, sourceFile, position) {
 	return getAnalyzer(ts, program, sourceFile).getTemplateCompletions(position)
 }
