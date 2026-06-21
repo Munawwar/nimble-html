@@ -1,10 +1,31 @@
 // @ts-nocheck
 
+/**
+ * @typedef {'html' | 'svg' | 'mathml'} Namespace
+ * @typedef {import('typescript').Node} TsNode
+ * @typedef {import('typescript').Symbol} TsSymbol
+ * @typedef {import('typescript').Declaration} TsDeclaration
+ * @typedef {import('typescript').Expression} TsExpression
+ * @typedef {import('typescript').Type} TsType
+ * @typedef {{expression: TsExpression, unwrapped: TsExpression}} ForceResult
+ * @typedef {{name: string, expression: TsExpression, node: TsNode}} SpreadEntry
+ */
+
+/**
+ * Test whether a declaration comes from nimble-html itself, not a user shadowing.
+ * @param {TsDeclaration} declaration
+ */
 function isNimbleDeclaration(declaration) {
 	const fileName = declaration.getSourceFile().fileName.replace(/\\/g, '/')
 	return /(^|\/)html\.(d\.ts|js)$/.test(fileName) || fileName.includes('/nimble-html/')
 }
 
+/**
+ * Strip syntax-only wrappers so type checks inspect the underlying expression.
+ * @param {typeof import('typescript')} ts
+ * @param {TsExpression} expression
+ * @returns {TsExpression}
+ */
 function unwrapExpression(ts, expression) {
 	let current = expression
 	while (
@@ -17,15 +38,29 @@ function unwrapExpression(ts, expression) {
 	return current
 }
 
+/**
+ * Create TypeScript symbol/type helpers shared by diagnostics and discovery.
+ * @param {object} context
+ */
 function createTypesAndExpressions(context) {
 	const {ts, checker, sourceFile, caches} = context
 
+	/**
+	 * Resolve the symbol at a node and unwrap import/export aliases.
+	 * @param {TsNode} node
+	 * @returns {TsSymbol | null}
+	 */
 	function getResolvedSymbol(node) {
 		let symbol = checker.getSymbolAtLocation(node)
 		if (symbol?.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol)
 		return symbol || null
 	}
 
+	/**
+	 * Resolve and cache a global type from the current SourceFile context.
+	 * @param {string} name
+	 * @returns {TsType | null}
+	 */
 	function getGlobalType(name) {
 		if (caches.globalTypes.has(name)) return caches.globalTypes.get(name)
 		const symbol = checker.resolveName(name, sourceFile, ts.SymbolFlags.Type, false)
@@ -34,6 +69,12 @@ function createTypesAndExpressions(context) {
 		return type
 	}
 
+	/**
+	 * Resolve a tag-name-map entry like HTMLElementTagNameMap["button"].
+	 * @param {string} mapName
+	 * @param {string} tagName
+	 * @returns {TsType | null}
+	 */
 	function getTagType(mapName, tagName) {
 		const cacheKey = `${mapName}:${tagName}`
 		if (caches.tagMapTypes.has(cacheKey)) return caches.tagMapTypes.get(cacheKey)
@@ -44,6 +85,12 @@ function createTypesAndExpressions(context) {
 		return type
 	}
 
+	/**
+	 * Resolve the DOM element instance type for a namespace/tag pair.
+	 * @param {Namespace} namespace
+	 * @param {string} tagName
+	 * @returns {TsType | null}
+	 */
 	function resolveElementType(namespace, tagName) {
 		const loweredTagName = tagName.toLowerCase()
 		const htmlType = getTagType('HTMLElementTagNameMap', loweredTagName)
@@ -59,6 +106,11 @@ function createTypesAndExpressions(context) {
 		return htmlType || svgType || mathType || null
 	}
 
+	/**
+	 * If the expression is nimble-html's force(value), return value for checking.
+	 * @param {TsExpression} expression
+	 * @returns {ForceResult}
+	 */
 	function unwrapForceExpression(expression) {
 		const current = unwrapExpression(ts, expression)
 		if (!ts.isCallExpression(current) || current.arguments.length !== 1)
@@ -72,6 +124,11 @@ function createTypesAndExpressions(context) {
 		return {expression: current, unwrapped: current}
 	}
 
+	/**
+	 * Extract statically-known entries from an object literal spread binding.
+	 * @param {TsExpression} expression
+	 * @returns {SpreadEntry[] | null}
+	 */
 	function resolveSpreadEntries(expression) {
 		let current = unwrapExpression(ts, expression)
 		if (ts.isIdentifier(current)) {

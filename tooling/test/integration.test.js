@@ -99,6 +99,11 @@ test('plugin diagnostics report structural markup rules', () => {
 	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/invalid-nesting'))
 	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/implicit-tbody'))
 	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/invalid-table-structure'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/duplicate-attribute'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/void-content'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/close-tag-attribute'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/invalid-element-name'))
+	assert(diagnostics.some(diagnostic => diagnostic.ruleId === 'nimble-html/invalid-element-parent'))
 	assert(
 		diagnostics.some(
 			diagnostic =>
@@ -106,6 +111,9 @@ test('plugin diagnostics report structural markup rules', () => {
 				String(diagnostic.messageText).includes('browser parsing will change the DOM tree'),
 		),
 	)
+	const duplicate = diagnostics.find(diagnostic => diagnostic.ruleId === 'nimble-html/duplicate-attribute')
+	assert.equal(duplicate?.start, getPosition(filePath, 'title="y"'))
+	assert.equal(duplicate?.length, 'title'.length)
 })
 
 test('plugin does not report structural diagnostics for explicit valid markup', () => {
@@ -124,7 +132,7 @@ test('plugin handles scanner state across template segment boundaries', () => {
 
 test('plugin reports additional optional-end-tag and mismatched-close cases', () => {
 	const {languageService} = createPluginLanguageService()
-	const filePath = path.join(fixtureRoot, 'src/structural-advanced.ts')
+	const filePath = path.join(fixtureRoot, 'src/structural-multiple.ts')
 	const diagnostics = languageService.getSemanticDiagnostics(filePath).filter(diagnostic => diagnostic.code >= 92000)
 	assert(diagnostics.filter(diagnostic => diagnostic.ruleId === 'nimble-html/implicit-optional-end-tag').length >= 3)
 	assert(diagnostics.filter(diagnostic => diagnostic.ruleId === 'nimble-html/mismatched-closing-tag').length >= 2)
